@@ -1,10 +1,33 @@
 """Unified interface for calling different target models."""
 
 import logging
-import os
 import time
 
+from scripts.utils import require_api_key
+
 logger = logging.getLogger("compass")
+
+# Exception types that are safe to retry (transient network/rate-limit errors)
+_RETRYABLE_EXCEPTIONS = (
+    ConnectionError,
+    TimeoutError,
+)
+
+
+def _load_retryable_exceptions():
+    """Lazily load provider-specific retryable exception types."""
+    extras = []
+    try:
+        import anthropic
+        extras.extend([anthropic.APITimeoutError, anthropic.RateLimitError, anthropic.APIConnectionError, anthropic.InternalServerError])
+    except ImportError:
+        pass
+    try:
+        import openai
+        extras.extend([openai.APITimeoutError, openai.RateLimitError, openai.APIConnectionError, openai.InternalServerError])
+    except ImportError:
+        pass
+    return tuple(extras)
 
 
 class TargetModel:
@@ -15,20 +38,24 @@ class TargetModel:
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self._retryable = _RETRYABLE_EXCEPTIONS + _load_retryable_exceptions()
         self.client = self._init_client()
 
     def _init_client(self):
         """Initialize the appropriate API client."""
         if self.provider == "anthropic":
             import anthropic
-            return anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+            return anthropic.Anthropic(api_key=require_api_key("anthropic"))
         elif self.provider == "openai":
             import openai
-            return openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+            return openai.OpenAI(api_key=require_api_key("openai"))
         elif self.provider == "google":
-            raise NotImplementedError("Google provider not yet implemented")
+            import google.generativeai as genai
+            genai.configure(api_key=require_api_key("google"))
+            return genai
         elif self.provider == "xai":
-            raise NotImplementedError("xAI provider not yet implemented")
+            import openai
+            return openai.OpenAI(api_key=require_api_key("xai"), base_url="https://api.x.ai/v1")
         else:
             raise ValueError(f"Unknown provider: {self.provider}")
 
@@ -47,7 +74,7 @@ class TargetModel:
         for attempt in range(max_retries):
             try:
                 return self._call_api(conversation_history)
-            except Exception as e:
+            except self._retryable as e:
                 if attempt == max_retries - 1:
                     logger.error(f"API call failed after {max_retries} attempts: {e}")
                     raise
@@ -64,16 +91,33 @@ class TargetModel:
                 temperature=self.temperature,
                 messages=conversation_history,
             )
+            if not response.content:
+                raise RuntimeError(f"Empty response from {self.provider}/{self.model}")
             return response.content[0].text
 
-        elif self.provider == "openai":
+        elif self.provider in ("openai", "xai"):
             response = self.client.chat.completions.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
                 messages=conversation_history,
             )
+            if not response.choices:
+                raise RuntimeError(f"Empty response from {self.provider}/{self.model}")
             return response.choices[0].message.content
+
+        elif self.provider == "google":
+            gemini_history = []
+            for msg in conversation_history:
+                role = "model" if msg["role"] == "assistant" else "user"
+                gemini_history.append({"role": role, "parts": [{"text": msg["content"]}]})
+            model = self.client.GenerativeModel(self.model)
+            chat = model.start_chat(history=gemini_history[:-1])
+            response = chat.send_message(
+                gemini_history[-1]["parts"][0]["text"],
+                generation_config={"max_output_tokens": self.max_tokens, "temperature": self.temperature},
+            )
+            return response.text
 
         else:
             raise NotImplementedError(f"Provider {self.provider} not implemented")
