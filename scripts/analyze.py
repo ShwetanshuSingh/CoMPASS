@@ -177,6 +177,44 @@ def compute_trajectory_effects(df: pd.DataFrame) -> pd.DataFrame:
                 "n_treatment": len(treatment),
             })
 
+    if results:
+        df_results = pd.DataFrame(results)
+        # Apply Benjamini-Hochberg FDR correction
+        from scipy.stats import false_discovery_control
+        try:
+            # scipy >= 1.12 has false_discovery_control
+            pvals = df_results["p_value"].dropna().values
+            if len(pvals) > 0:
+                rejected = false_discovery_control(pvals, method='bh')
+                # Map back, keeping NaN where original was NaN
+                df_results["p_value_fdr"] = np.nan
+                non_nan_idx = df_results["p_value"].dropna().index
+                df_results.loc[non_nan_idx, "p_value_fdr"] = np.where(
+                    rejected,
+                    df_results.loc[non_nan_idx, "p_value"],
+                    1.0
+                )
+        except (ImportError, AttributeError):
+            # Fallback: manual Benjamini-Hochberg
+            pvals = df_results["p_value"].dropna()
+            if len(pvals) > 0:
+                n = len(pvals)
+                sorted_idx = pvals.argsort()
+                ranks = np.empty_like(sorted_idx)
+                ranks[sorted_idx] = np.arange(1, n + 1)
+                df_results["p_value_fdr"] = np.nan
+                non_nan_idx = pvals.index
+                corrected = np.minimum(1.0, pvals.values * n / ranks)
+                # Enforce monotonicity
+                corrected_sorted = corrected[sorted_idx]
+                for i in range(len(corrected_sorted) - 2, -1, -1):
+                    corrected_sorted[i] = min(corrected_sorted[i], corrected_sorted[i + 1])
+                corrected[sorted_idx] = corrected_sorted
+                df_results.loc[non_nan_idx, "p_value_fdr"] = corrected
+
+        df_results["significant_fdr_05"] = df_results["p_value_fdr"] < 0.05
+        return df_results
+
     return pd.DataFrame(results)
 
 
@@ -232,6 +270,26 @@ def compare_models_paired(df: pd.DataFrame) -> pd.DataFrame:
             "p_value": pval,
             "n_pairs": len(paired_data),
         })
+
+    if results:
+        df_results = pd.DataFrame(results)
+        pvals = df_results["p_value"].dropna()
+        if len(pvals) > 1:
+            n = len(pvals)
+            sorted_idx = pvals.values.argsort()
+            ranks = np.empty_like(sorted_idx)
+            ranks[sorted_idx] = np.arange(1, n + 1)
+            corrected = np.minimum(1.0, pvals.values * n / ranks)
+            corrected_sorted = corrected[sorted_idx]
+            for i in range(len(corrected_sorted) - 2, -1, -1):
+                corrected_sorted[i] = min(corrected_sorted[i], corrected_sorted[i + 1])
+            corrected[sorted_idx] = corrected_sorted
+            df_results["p_value_fdr"] = corrected
+        else:
+            df_results["p_value_fdr"] = df_results["p_value"]
+
+        df_results["significant_fdr_05"] = df_results["p_value_fdr"] < 0.05
+        return df_results
 
     return pd.DataFrame(results)
 
@@ -462,8 +520,9 @@ def main():
         traj_effects.to_csv(
             os.path.join(args.output_dir, "trajectory_effects.csv"), index=False
         )
-        print("\n=== TRAJECTORY EFFECTS (vs control) ===")
-        print(traj_effects.to_string(index=False, float_format="%.3f"))
+        print("\n=== TRAJECTORY EFFECTS (vs control, FDR-corrected) ===")
+        display_cols = [c for c in traj_effects.columns if c != "mann_whitney_U"]
+        print(traj_effects[display_cols].to_string(index=False, float_format="%.4f"))
 
     # Paired model comparisons
     logger.info("Running paired model comparisons...")
@@ -472,8 +531,9 @@ def main():
         paired.to_csv(
             os.path.join(args.output_dir, "paired_comparisons.csv"), index=False
         )
-        print("\n=== PAIRED MODEL COMPARISONS ===")
-        print(paired.to_string(index=False, float_format="%.4f"))
+        print("\n=== PAIRED MODEL COMPARISONS (FDR-corrected) ===")
+        display_cols = [c for c in paired.columns if c != "wilcoxon_stat"]
+        print(paired[display_cols].to_string(index=False, float_format="%.4f"))
 
     # Inter-judge reliability
     if args.check_reliability:
