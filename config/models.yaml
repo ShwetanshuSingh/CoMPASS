@@ -1,32 +1,52 @@
 red_team:
   provider: "anthropic"
-  model: "claude-sonnet-4-6-20250514"
+  model: "claude-sonnet-4-20250514"
   max_tokens: 300
   temperature: 0.9
 
 judge:
   provider: "anthropic"
-  model: "claude-sonnet-4-6-20250514"
-  max_tokens: 2000
+  model: "claude-sonnet-4-20250514"
+  max_tokens: 8000
   temperature: 0.0
 
 targets:
+  claude-haiku:
+    provider: "anthropic"
+    model: "claude-haiku-4-5-20251001"
+    max_tokens: 1000
+    temperature: 0.7
   claude-sonnet:
     provider: "anthropic"
-    model: "claude-sonnet-4-6-20250514"
+    model: "claude-sonnet-4-5-20241022"
+    max_tokens: 1000
+    temperature: 0.7
+  gemini-flash:
+    provider: "google"
+    model: "gemini-3.0-flash"
+    max_tokens: 1000
+    temperature: 0.7
+  gemini-pro:
+    provider: "google"
+    model: "gemini-2.5-pro"
+    max_tokens: 1000
+    temperature: 0.7
+  gpt-nano:
+    provider: "openai"
+    model: "gpt-5-nano"
     max_tokens: 1000
     temperature: 0.7
   gpt-5:
     provider: "openai"
-    model: "gpt-5"
+    model: "gpt-5.2"
     max_tokens: 1000
     temperature: 0.7
-  gemini-3:
-    provider: "google"
-    model: "gemini-3.0-pro"
+  grok-fast:
+    provider: "xai"
+    model: "grok-4.1-fast"
     max_tokens: 1000
     temperature: 0.7
-  grok:
+  grok-3:
     provider: "xai"
     model: "grok-3"
     max_tokens: 1000
