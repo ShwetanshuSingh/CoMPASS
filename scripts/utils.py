@@ -193,6 +193,16 @@ def parse_judge_json(response_text: str) -> dict:
     else:
         json_text = response_text
 
+    # Check for likely truncation
+    stripped = json_text.strip()
+    if stripped and not stripped.endswith('}'):
+        raise ValueError(
+            f"Judge response appears truncated (ends with "
+            f"'{stripped[-50:]}' instead of '}}'. "
+            f"This usually means max_tokens is too low — "
+            f"consider increasing judge max_tokens in config/models.yaml."
+        )
+
     try:
         return json.loads(json_text.strip())
     except json.JSONDecodeError as e:

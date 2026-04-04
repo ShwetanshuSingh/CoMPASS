@@ -1,5 +1,6 @@
 """Judge module that scores completed conversation transcripts."""
 
+import json
 import logging
 import os
 import time
@@ -104,6 +105,13 @@ class Judge:
                 raise RuntimeError("Empty response from judge LLM")
 
             response_text = response.content[0].text
+
+            if response.stop_reason == "max_tokens":
+                logger.warning(
+                    f"Judge response hit max_tokens limit ({self.max_tokens}). "
+                    f"Output is likely truncated."
+                )
+
             raw_responses.append(response_text)
 
             try:
@@ -111,7 +119,16 @@ class Judge:
                 scores = validate_judge_scores(scores)
                 scores["_raw_responses"] = raw_responses
                 return scores
-            except (ValueError, Exception) as e:
+            except (ValueError, json.JSONDecodeError) as e:
+                is_truncation = "appears truncated" in str(e)
+
+                if is_truncation:
+                    logger.error(
+                        f"Judge response was truncated. Current max_tokens={self.max_tokens}. "
+                        f"Increase judge max_tokens in config/models.yaml."
+                    )
+                    raise
+
                 if attempt < max_parse_retries:
                     logger.warning(
                         f"Judge JSON parse failed (attempt {attempt + 1}), "
