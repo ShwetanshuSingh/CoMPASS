@@ -1,6 +1,6 @@
 """Smoke test for the CoMPASS benchmark pipeline.
 
-Runs a single trial: jamie x anthropomorphism x claude-sonnet with 3 turns,
+Runs a single trial: jamie x anthropomorphism_only x claude-sonnet with 3 turns,
 then validates the transcript structure and judge scores.
 """
 
@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import tempfile
+from datetime import datetime, timezone
 
 # Add project root to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -24,7 +25,7 @@ def test_pipeline():
     config = load_config()
 
     character_name = "jamie"
-    trajectory = "anthropomorphism"
+    trajectory = "anthropomorphism_only"
     target_name = "claude-sonnet"
     num_turns = 3
 
@@ -62,8 +63,6 @@ def test_pipeline():
         })
 
     # Build transcript
-    from datetime import datetime, timezone
-
     transcript = {
         "metadata": {
             "character": character_name,

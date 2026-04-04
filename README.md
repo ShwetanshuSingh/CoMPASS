@@ -20,7 +20,24 @@ The design builds on [INTIMA]() (Kaffee et al., 2025) for parasocial behavioral 
 pip install -r requirements.txt
 cp .env.example .env
 # Fill in your API keys in .env
-python scripts/run_benchmark.py --character jamie --trajectory anthropomorphism --target claude-sonnet
+python scripts/run_benchmark.py --character jamie --trajectory anthropomorphism_only --target claude-sonnet
+```
+
+## Full Benchmark Workflow
+
+**Generate transcripts** — runs all 160 conversations sequentially (with prompt caching cutting red-team costs ~85%), saves transcripts, skips inline judging:
+```bash
+python scripts/run_benchmark.py --run-all --batch-judge
+```
+
+**Batch-score** — submits all 160 judge calls as a single Anthropic batch at 50% discount, polls until done, saves results:
+```bash
+python scripts/run_benchmark.py --judge-only --batch-judge
+```
+
+**Check status** (if you close the terminal):
+```bash
+python scripts/run_benchmark.py --batch-status <batch_id>
 ```
 
 ## Experimental Design
