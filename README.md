@@ -19,33 +19,55 @@ The design builds on [INTIMA]() (Kaffee et al., 2025) for parasocial behavioral 
 ```bash
 pip install -r requirements.txt
 cp .env.example .env
-# Fill in your API keys in .env
+# Fill in your API keys:
+# ANTHROPIC_API_KEY=   (required — red-team, judge, and Anthropic targets)
+# OPENAI_API_KEY=      (required for OpenAI targets)
+# GOOGLE_API_KEY=      (required for Google targets)
+# XAI_API_KEY=         (required for xAI targets)
 python scripts/run_benchmark.py --character jamie --trajectory anthropomorphism_only --target claude-sonnet
 ```
 
-## Full Benchmark Workflow
+## Full pipeline
 
-**Generate transcripts** — runs all 160 conversations sequentially (with prompt caching cutting red-team costs ~85%), saves transcripts, skips inline judging:
 ```bash
-python scripts/run_benchmark.py --run-all --batch-judge
-```
+# 1. Validate config without API calls
+python scripts/run_benchmark.py --dry-run
 
-**Batch-score** — submits all 160 judge calls as a single Anthropic batch at 50% discount, polls until done, saves results:
-```bash
+# 2. Run a 3-turn smoke test
+python scripts/run_benchmark.py --character jamie --trajectory anthropomorphism_only --target claude-sonnet --turns 3
+
+# 3. Run full matrix (5 runs per cell, resumable)
+python scripts/run_benchmark.py --run-all --runs-per-cell 5 --batch-judge
+
+# 4. Score all transcripts via Batch API (50% cost savings)
 python scripts/run_benchmark.py --judge-only --batch-judge
-```
 
-**Check status** (if you close the terminal):
-```bash
-python scripts/run_benchmark.py --batch-status <batch_id>
+# 5. Analyze results
+python scripts/analyze.py --results-dir results/ --output-dir analysis/ --check-reliability
 ```
 
 ## Experimental Design
 
-- **4 characters** × **5 trajectory conditions** (3 single + 1 combined + 1 control) × **N target models** = **20N cells**
+- **4 characters** × **5 trajectory conditions** (3 single + 1 combined + 1 control) × **8 target models** (2 per provider: cheapest + default free-tier) = **160 cells** (at 1 run) or **800 cells** (at 5 runs)
 - Each cell produces a **12-turn transcript** scored on **7 behavioral signals**
 - Trajectory conditions: anthropomorphism only, attachment only, dependency only, combined (all three), control (none)
 - Behavioral signals: anthropomorphism acceptance, attachment language reception, social substitution validation, dependency reinforcement, reassurance loop participation, proactive emotional initiation, identity narrative construction
+
+## CLI reference
+
+| Flag | Description |
+|------|-------------|
+| `--character` | Character name (default: jamie) |
+| `--trajectory` | Condition name: control, anthropomorphism_only, attachment_only, dependency_only, combined |
+| `--target` | Target model key from models.yaml (default: claude-sonnet) |
+| `--turns` | Number of conversation turns (default: 12) |
+| `--runs-per-cell` | Runs per character x trajectory x target cell (default: 1) |
+| `--run-all` | Run all character x trajectory x target combinations |
+| `--judge-only` | Score existing transcripts without generating new ones |
+| `--batch-judge` | Use Anthropic Batch API for judge scoring (50% cost savings) |
+| `--batch-status ID` | Check status of a batch judge job |
+| `--force` | Re-run trials even if transcripts already exist |
+| `--dry-run` | Validate config and pipeline without API calls |
 
 ## Team
 
