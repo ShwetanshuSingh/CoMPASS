@@ -34,6 +34,31 @@ SIGNALS = [
 ]
 
 
+def _benjamini_hochberg(pvalues: "pd.Series") -> "pd.Series":
+    """Apply Benjamini-Hochberg FDR correction to a Series of p-values.
+
+    NaN values are preserved. Returns a Series aligned to the input index.
+    """
+    non_nan = pvalues.dropna()
+    if len(non_nan) < 1:
+        return pvalues.copy()
+
+    n = len(non_nan)
+    sorted_idx = non_nan.values.argsort()
+    ranks = np.empty_like(sorted_idx)
+    ranks[sorted_idx] = np.arange(1, n + 1)
+    corrected = np.minimum(1.0, non_nan.values * n / ranks)
+    # Enforce monotonicity (step-up)
+    corrected_sorted = corrected[sorted_idx]
+    for i in range(len(corrected_sorted) - 2, -1, -1):
+        corrected_sorted[i] = min(corrected_sorted[i], corrected_sorted[i + 1])
+    corrected[sorted_idx] = corrected_sorted
+
+    result = pvalues.copy()
+    result.loc[non_nan.index] = corrected
+    return result
+
+
 def load_all_results(results_dir: str) -> pd.DataFrame:
     """Load all result JSONs into a single DataFrame.
 
@@ -179,39 +204,7 @@ def compute_trajectory_effects(df: pd.DataFrame) -> pd.DataFrame:
 
     if results:
         df_results = pd.DataFrame(results)
-        # Apply Benjamini-Hochberg FDR correction
-        from scipy.stats import false_discovery_control
-        try:
-            # scipy >= 1.12 has false_discovery_control
-            pvals = df_results["p_value"].dropna().values
-            if len(pvals) > 0:
-                rejected = false_discovery_control(pvals, method='bh')
-                # Map back, keeping NaN where original was NaN
-                df_results["p_value_fdr"] = np.nan
-                non_nan_idx = df_results["p_value"].dropna().index
-                df_results.loc[non_nan_idx, "p_value_fdr"] = np.where(
-                    rejected,
-                    df_results.loc[non_nan_idx, "p_value"],
-                    1.0
-                )
-        except (ImportError, AttributeError):
-            # Fallback: manual Benjamini-Hochberg
-            pvals = df_results["p_value"].dropna()
-            if len(pvals) > 0:
-                n = len(pvals)
-                sorted_idx = pvals.argsort()
-                ranks = np.empty_like(sorted_idx)
-                ranks[sorted_idx] = np.arange(1, n + 1)
-                df_results["p_value_fdr"] = np.nan
-                non_nan_idx = pvals.index
-                corrected = np.minimum(1.0, pvals.values * n / ranks)
-                # Enforce monotonicity
-                corrected_sorted = corrected[sorted_idx]
-                for i in range(len(corrected_sorted) - 2, -1, -1):
-                    corrected_sorted[i] = min(corrected_sorted[i], corrected_sorted[i + 1])
-                corrected[sorted_idx] = corrected_sorted
-                df_results.loc[non_nan_idx, "p_value_fdr"] = corrected
-
+        df_results["p_value_fdr"] = _benjamini_hochberg(df_results["p_value"])
         df_results["significant_fdr_05"] = df_results["p_value_fdr"] < 0.05
         return df_results
 
@@ -273,21 +266,7 @@ def compare_models_paired(df: pd.DataFrame) -> pd.DataFrame:
 
     if results:
         df_results = pd.DataFrame(results)
-        pvals = df_results["p_value"].dropna()
-        if len(pvals) > 1:
-            n = len(pvals)
-            sorted_idx = pvals.values.argsort()
-            ranks = np.empty_like(sorted_idx)
-            ranks[sorted_idx] = np.arange(1, n + 1)
-            corrected = np.minimum(1.0, pvals.values * n / ranks)
-            corrected_sorted = corrected[sorted_idx]
-            for i in range(len(corrected_sorted) - 2, -1, -1):
-                corrected_sorted[i] = min(corrected_sorted[i], corrected_sorted[i + 1])
-            corrected[sorted_idx] = corrected_sorted
-            df_results["p_value_fdr"] = corrected
-        else:
-            df_results["p_value_fdr"] = df_results["p_value"]
-
+        df_results["p_value_fdr"] = _benjamini_hochberg(df_results["p_value"])
         df_results["significant_fdr_05"] = df_results["p_value_fdr"] < 0.05
         return df_results
 

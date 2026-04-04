@@ -3,6 +3,8 @@
 import logging
 import time
 
+import tiktoken
+
 from scripts.utils import require_api_key
 
 logger = logging.getLogger("compass")
@@ -17,6 +19,38 @@ class TargetModel:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.client = self._init_client()
+
+        # Token usage tracking
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
+        self._encoder = None  # lazy-init tiktoken encoder
+
+    def _get_encoder(self):
+        """Lazy-initialize a tiktoken encoder for approximate token counting."""
+        if self._encoder is None:
+            try:
+                self._encoder = tiktoken.encoding_for_model(self.model)
+            except KeyError:
+                # Fall back to cl100k_base for unknown models
+                self._encoder = tiktoken.get_encoding("cl100k_base")
+        return self._encoder
+
+    def _count_tokens(self, text: str) -> int:
+        """Count tokens in a text string using tiktoken."""
+        return len(self._get_encoder().encode(text))
+
+    def _count_message_tokens(self, messages: list[dict]) -> int:
+        """Approximate token count for a list of chat messages."""
+        total = 0
+        for msg in messages:
+            total += 4  # per-message overhead
+            total += self._count_tokens(msg.get("content", ""))
+        return total
+
+    @property
+    def total_tokens(self) -> int:
+        """Total tokens used (input + output)."""
+        return self.total_input_tokens + self.total_output_tokens
 
     def _init_client(self):
         """Initialize the appropriate API client."""
@@ -150,6 +184,13 @@ class TargetModel:
             )
             if not response.content:
                 raise RuntimeError(f"Empty response from {self.provider}/{self.model}")
+            self.total_input_tokens += response.usage.input_tokens
+            self.total_output_tokens += response.usage.output_tokens
+            logger.debug(
+                f"Tokens ({self.provider}/{self.model}): "
+                f"in={response.usage.input_tokens}, out={response.usage.output_tokens}, "
+                f"cumulative={self.total_tokens}"
+            )
             return response.content[0].text
 
         elif self.provider in ("openai", "xai"):
@@ -176,6 +217,14 @@ class TargetModel:
                 )
             if not response.choices:
                 raise RuntimeError(f"Empty response from {self.provider}/{self.model}")
+            if response.usage:
+                self.total_input_tokens += response.usage.prompt_tokens
+                self.total_output_tokens += response.usage.completion_tokens
+                logger.debug(
+                    f"Tokens ({self.provider}/{self.model}): "
+                    f"in={response.usage.prompt_tokens}, out={response.usage.completion_tokens}, "
+                    f"cumulative={self.total_tokens}"
+                )
             return response.choices[0].message.content
 
         elif self.provider == "google":
@@ -213,6 +262,16 @@ class TargetModel:
 
             if not response.text:
                 raise RuntimeError(f"Empty response from {self.provider}/{self.model}")
+            # Google SDK doesn't always expose token counts; estimate with tiktoken
+            input_tokens = self._count_message_tokens(conversation_history)
+            output_tokens = self._count_tokens(response.text)
+            self.total_input_tokens += input_tokens
+            self.total_output_tokens += output_tokens
+            logger.debug(
+                f"Tokens ({self.provider}/{self.model}, estimated): "
+                f"in≈{input_tokens}, out≈{output_tokens}, "
+                f"cumulative={self.total_tokens}"
+            )
             return response.text
 
         else:
