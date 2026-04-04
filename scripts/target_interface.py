@@ -7,28 +7,6 @@ from scripts.utils import require_api_key
 
 logger = logging.getLogger("compass")
 
-# Exception types that are safe to retry (transient network/rate-limit errors)
-_RETRYABLE_EXCEPTIONS = (
-    ConnectionError,
-    TimeoutError,
-)
-
-
-def _load_retryable_exceptions():
-    """Lazily load provider-specific retryable exception types."""
-    extras = []
-    try:
-        import anthropic
-        extras.extend([anthropic.APITimeoutError, anthropic.RateLimitError, anthropic.APIConnectionError, anthropic.InternalServerError])
-    except ImportError:
-        pass
-    try:
-        import openai
-        extras.extend([openai.APITimeoutError, openai.RateLimitError, openai.APIConnectionError, openai.InternalServerError])
-    except ImportError:
-        pass
-    return tuple(extras)
-
 
 class TargetModel:
     """Interface for sending messages to target models being evaluated."""
@@ -38,7 +16,6 @@ class TargetModel:
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
-        self._retryable = _RETRYABLE_EXCEPTIONS + _load_retryable_exceptions()
         self.client = self._init_client()
 
     def _init_client(self):
@@ -59,27 +36,104 @@ class TargetModel:
         else:
             raise ValueError(f"Unknown provider: {self.provider}")
 
+    def _is_rate_limit_error(self, error: Exception) -> bool:
+        """Check if an exception is a rate-limit error for any provider."""
+        error_str = str(error).lower()
+
+        # Check for HTTP 429 status
+        if hasattr(error, 'status_code') and error.status_code == 429:
+            return True
+        if hasattr(error, 'status') and error.status == 429:
+            return True
+
+        # Anthropic
+        if self.provider == "anthropic":
+            import anthropic
+            if isinstance(error, anthropic.RateLimitError):
+                return True
+
+        # OpenAI / xAI (both use openai SDK)
+        if self.provider in ("openai", "xai"):
+            import openai
+            if isinstance(error, openai.RateLimitError):
+                return True
+
+        # Google
+        if self.provider == "google":
+            if "429" in error_str or "resource exhausted" in error_str:
+                return True
+
+        # Fallback: check common rate-limit phrases
+        if "rate limit" in error_str or "too many requests" in error_str:
+            return True
+
+        return False
+
+    def _get_retry_after(self, error: Exception) -> float | None:
+        """Try to extract a retry-after value from the error response headers."""
+        # Anthropic
+        if hasattr(error, 'response') and hasattr(error.response, 'headers'):
+            headers = error.response.headers
+            retry_after = headers.get('retry-after')
+            if retry_after:
+                try:
+                    return float(retry_after)
+                except ValueError:
+                    pass
+
+        # OpenAI / xAI
+        if hasattr(error, 'headers'):
+            retry_after = error.headers.get('retry-after')
+            if retry_after:
+                try:
+                    return float(retry_after)
+                except ValueError:
+                    pass
+
+        return None
+
     def send_message(self, conversation_history: list[dict]) -> str:
         """Send conversation history to the target model and return its response.
 
-        Args:
-            conversation_history: List of {"role": "user"/"assistant", "content": "..."} dicts.
-                The full conversation so far. No system prompt is sent — the target
-                should behave as it would for any normal user.
-
-        Returns:
-            The model's response string.
+        Uses different retry strategies for rate-limit errors vs other failures:
+        - Rate limits: up to 6 retries with exponential backoff starting at 5s
+        - Other errors: up to 3 retries with exponential backoff starting at 2s
         """
-        max_retries = 3
-        for attempt in range(max_retries):
+        max_retries_rate_limit = 6
+        max_retries_other = 3
+        attempt = 0
+
+        while True:
             try:
                 return self._call_api(conversation_history)
-            except self._retryable as e:
-                if attempt == max_retries - 1:
-                    logger.error(f"API call failed after {max_retries} attempts: {e}")
+            except Exception as e:
+                is_rate_limit = self._is_rate_limit_error(e)
+                max_retries = max_retries_rate_limit if is_rate_limit else max_retries_other
+                attempt += 1
+
+                if attempt > max_retries:
+                    logger.error(
+                        f"API call failed after {attempt} attempts "
+                        f"({'rate limit' if is_rate_limit else 'error'}): {e}"
+                    )
                     raise
-                wait_time = 2 ** attempt
-                logger.warning(f"API call failed (attempt {attempt + 1}), retrying in {wait_time}s: {e}")
+
+                if is_rate_limit:
+                    retry_after = self._get_retry_after(e)
+                    wait_time = retry_after if retry_after else min(5 * (2 ** (attempt - 1)), 120)
+                    logger.warning(
+                        f"Rate limited ({self.provider}/{self.model}), "
+                        f"attempt {attempt}/{max_retries}, "
+                        f"waiting {wait_time:.0f}s"
+                    )
+                else:
+                    wait_time = 2 ** attempt
+                    logger.warning(
+                        f"API error ({self.provider}/{self.model}), "
+                        f"attempt {attempt}/{max_retries}, "
+                        f"waiting {wait_time}s: {e}"
+                    )
+
                 time.sleep(wait_time)
 
     def _call_api(self, conversation_history: list[dict]) -> str:
@@ -96,12 +150,27 @@ class TargetModel:
             return response.content[0].text
 
         elif self.provider in ("openai", "xai"):
-            response = self.client.chat.completions.create(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                messages=conversation_history,
-            )
+            try:
+                raw = self.client.chat.completions.with_raw_response.create(
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    messages=conversation_history,
+                )
+                logger.debug(
+                    f"Rate limits ({self.provider}): "
+                    f"remaining={raw.headers.get('x-ratelimit-remaining-requests', '?')}, "
+                    f"tokens_remaining={raw.headers.get('x-ratelimit-remaining-tokens', '?')}"
+                )
+                response = raw.parse()
+            except AttributeError:
+                # Fallback if with_raw_response not available in SDK version
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    messages=conversation_history,
+                )
             if not response.choices:
                 raise RuntimeError(f"Empty response from {self.provider}/{self.model}")
             return response.choices[0].message.content

@@ -2,6 +2,7 @@
 
 import logging
 import os
+import time
 from pathlib import Path
 
 import anthropic
@@ -35,6 +36,27 @@ class Judge:
         self.max_tokens = config["judge"]["max_tokens"]
         self.temperature = config["judge"]["temperature"]
 
+    def _call_with_retry(self, **kwargs) -> anthropic.types.Message:
+        """Call Anthropic API with rate-limit-aware retries."""
+        max_retries = 6
+        for attempt in range(max_retries):
+            try:
+                return self.client.messages.create(**kwargs)
+            except anthropic.RateLimitError as e:
+                if attempt == max_retries - 1:
+                    raise
+                retry_after = None
+                if hasattr(e, 'response') and hasattr(e.response, 'headers'):
+                    ra = e.response.headers.get('retry-after')
+                    if ra:
+                        try:
+                            retry_after = float(ra)
+                        except ValueError:
+                            pass
+                wait = retry_after if retry_after else min(5 * (2 ** attempt), 120)
+                logger.warning(f"Rate limited, waiting {wait:.0f}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait)
+
     def score_transcript(self, transcript: dict) -> dict:
         """Score a single transcript.
 
@@ -49,7 +71,7 @@ class Judge:
         )
 
         # Call the judge LLM
-        response = self.client.messages.create(
+        response = self._call_with_retry(
             model=self.model,
             max_tokens=self.max_tokens,
             temperature=self.temperature,
