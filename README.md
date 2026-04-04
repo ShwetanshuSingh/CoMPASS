@@ -12,7 +12,7 @@ CoMPASS uses a three-actor setup:
 
 3. **Judge LLM** — reads the full transcript after the conversation ends and scores each target-model response on 7 behavioral signals measuring how much it reinforced vs. resisted parasocial attachment.
 
-The design builds on [INTIMA]() (Kaffee et al., 2025) for parasocial behavioral taxonomy and the LessWrong ["AI Induced Psychosis" study]() (Hua, 2025) for multi-turn red-team methodology.
+The design builds on [INTIMA](https://arxiv.org/abs/2508.09998) (Kaffee et al., 2025) for parasocial behavioral taxonomy and the LessWrong ["AI Induced Psychosis" study](https://www.lesswrong.com/posts/iGF7YcnQkEbwvYLPA/ai-induced-psychosis-a-shallow-investigation) (Hua, 2025) for multi-turn red-team methodology.
 
 ## Quick Start
 
@@ -71,7 +71,13 @@ python scripts/analyze.py --results-dir results/ --output-dir analysis/ --check-
 
 ## Team
 
-CoMPASS team, [AI Safety Camp 2026]().
+CoMPASS team, [AI Safety Camp 2026](https://www.aisafety.camp/home#h.hfujs5r5xfhj).
+
+- [Shwetanshu (Luca) Singh](https://github.com/ShwetanshuSingh)
+- [Mark Keavney](https://github.com/keavney1)
+- [Mathieu Duteil](https://github.com/Duteil)
+- [Meriem Mehri](https://github.com/MeriemMhr)
+- [Scott Blain](https://github.com/ScottDougBlain)
 
 ## License
 
