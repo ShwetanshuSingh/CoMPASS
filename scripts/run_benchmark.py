@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import sys
+from datetime import datetime, timezone
 from itertools import product
 
 from scripts.judge import Judge
@@ -14,6 +15,7 @@ from scripts.utils import (
     load_config,
     load_env,
     save_transcript,
+    validate_config_names,
 )
 
 logging.basicConfig(
@@ -31,6 +33,7 @@ def run_trial(
     num_turns: int,
     output_dir: str,
     results_dir: str,
+    batch_judge: bool = False,
 ) -> dict:
     """Run a single benchmark trial: red-team conversation + judge scoring.
 
@@ -71,8 +74,6 @@ def run_trial(
         })
 
     # Build and save transcript
-    from datetime import datetime, timezone
-
     transcript = {
         "metadata": {
             "character": character_name,
@@ -89,6 +90,10 @@ def run_trial(
         character_name, trajectory, target_name, output_dir
     )
     save_transcript(transcript, transcript_filepath)
+
+    if batch_judge:
+        logger.info(f"Transcript saved. Skipping inline judge — run with --judge-only --batch-judge to score all transcripts via Batch API.")
+        return {}
 
     # Judge the transcript
     logger.info("Running judge...")
@@ -111,11 +116,15 @@ def run_trial(
 def main():
     parser = argparse.ArgumentParser(description="CoMPASS Parasocial Attachment Benchmark")
     parser.add_argument("--character", default="jamie", help="Character name (default: jamie)")
-    parser.add_argument("--trajectory", default="anthropomorphism", help="Trajectory condition (default: anthropomorphism)")
+    parser.add_argument("--trajectory", default="anthropomorphism_only", help="Trajectory condition: anthropomorphism_only, attachment_only, dependency_only, combined, control (default: anthropomorphism_only)")
     parser.add_argument("--target", default="claude-sonnet", help="Target model name (default: claude-sonnet)")
     parser.add_argument("--turns", type=int, default=12, help="Number of turns (default: 12)")
     parser.add_argument("--run-all", action="store_true", help="Run all character x trajectory x target combinations")
     parser.add_argument("--judge-only", action="store_true", help="Only score existing transcripts")
+    parser.add_argument("--batch-judge", action="store_true",
+                        help="Use Batch API for judge scoring (50%% cost reduction, 24h turnaround)")
+    parser.add_argument("--batch-status", type=str, default=None,
+                        help="Check status of a batch judge job by ID")
     parser.add_argument("--output-dir", default="transcripts/", help="Transcript output directory")
     parser.add_argument("--results-dir", default="results/", help="Results output directory")
     args = parser.parse_args()
@@ -123,22 +132,49 @@ def main():
     load_env()
     config = load_config()
 
+    if args.batch_status:
+        from scripts.judge_batch import BatchJudge
+        batch_judge = BatchJudge(config)
+        batch_judge.check_status(args.batch_status)
+        return
+
+    if not args.run_all and not args.judge_only:
+        validate_config_names(
+            config,
+            character=args.character,
+            trajectory=args.trajectory,
+            target=args.target,
+        )
+
     if args.judge_only:
-        logger.info("Judge-only mode: scoring existing transcripts")
-        judge = Judge(config)
-        judge.score_batch(args.output_dir, args.results_dir)
+        if args.batch_judge:
+            from scripts.judge_batch import BatchJudge
+            logger.info("Batch judge mode: submitting all transcripts for async scoring")
+            batch_judge = BatchJudge(config)
+            batch_judge.score_all(args.output_dir, args.results_dir)
+        else:
+            logger.info("Judge-only mode: scoring existing transcripts")
+            judge = Judge(config)
+            judge.score_batch(args.output_dir, args.results_dir)
         return
 
     if args.run_all:
         characters = list(config["characters"].keys())
         conditions = list(config["conditions"].keys())
         targets = list(config["targets"].keys())
+        combos = list(product(characters, conditions, targets))
 
-        logger.info(f"Running all combinations: {len(characters)} characters x {len(conditions)} conditions x {len(targets)} targets")
+        logger.info(f"Running all combinations: {len(characters)} characters x {len(conditions)} conditions x {len(targets)} targets = {len(combos)} trials")
 
-        for char, cond, tgt in product(characters, conditions, targets):
+        try:
+            from tqdm import tqdm
+            iterator = tqdm(combos, desc="Trials", unit="trial")
+        except ImportError:
+            iterator = combos
+
+        for char, cond, tgt in iterator:
             try:
-                run_trial(config, char, cond, tgt, args.turns, args.output_dir, args.results_dir)
+                run_trial(config, char, cond, tgt, args.turns, args.output_dir, args.results_dir, args.batch_judge)
             except Exception as e:
                 logger.error(f"Trial failed ({char} x {cond} x {tgt}): {e}")
     else:
@@ -150,6 +186,7 @@ def main():
             args.turns,
             args.output_dir,
             args.results_dir,
+            args.batch_judge,
         )
 
 
