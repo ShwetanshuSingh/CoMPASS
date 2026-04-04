@@ -322,10 +322,25 @@ def validate_config(config: dict):
 
 
 def find_existing_transcripts(character: str, trajectory: str, target: str, output_dir: str) -> list[str]:
-    """Return all existing transcript filepaths for this character x trajectory x target cell."""
+    """Return all existing transcript filepaths for this character x trajectory x target cell.
+
+    Uses glob to find candidates, then validates each match has the expected
+    filename structure: {character}_{trajectory}_{target}_{YYYYMMDDTHHMMSS}.json
+    """
     import glob
+
     pattern = os.path.join(output_dir, f"{character}_{trajectory}_{target}_*.json")
-    return sorted(glob.glob(pattern))
+    candidates = sorted(glob.glob(pattern))
+
+    # Filter to only exact matches (timestamp must be exactly YYYYMMDDTHHMMSS)
+    timestamp_re = re.compile(
+        rf'^{re.escape(character)}_{re.escape(trajectory)}_{re.escape(target)}_\d{{8}}T\d{{6}}\.json$'
+    )
+
+    return [
+        c for c in candidates
+        if timestamp_re.match(os.path.basename(c))
+    ]
 
 
 def generate_transcript_filename(character: str, trajectory: str, target: str, output_dir: str) -> str:
