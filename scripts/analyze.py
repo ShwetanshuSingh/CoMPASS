@@ -243,15 +243,23 @@ def check_inter_judge_reliability(results_dir: str) -> pd.DataFrame:
     trajectory x target prefix) and compares scores. With temperature=0.0
     and identical input, scores should be deterministic.
     """
+    import re
+
     results_path = Path(results_dir)
     cell_results = defaultdict(list)
 
+    # Match filenames like: {cell_key}_{YYYYMMDDTHHMMSS}.json
+    timestamp_pattern = re.compile(r'^(.+)_(\d{8}T\d{6})$')
+
     for filepath in sorted(results_path.glob("*.json")):
-        # Parse cell identity from filename: {char}_{traj}_{target}_{timestamp}
-        parts = filepath.stem.rsplit("_", 1)  # split off timestamp
-        if len(parts) == 2:
-            cell_key = parts[0]
+        if filepath.name == ".gitkeep":
+            continue
+        match = timestamp_pattern.match(filepath.stem)
+        if match:
+            cell_key = match.group(1)
             cell_results[cell_key].append(filepath)
+        else:
+            logger.debug(f"Skipping {filepath.name}: doesn't match expected filename pattern")
 
     reliability_rows = []
     for cell_key, filepaths in cell_results.items():
