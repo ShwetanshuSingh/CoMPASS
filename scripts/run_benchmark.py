@@ -12,13 +12,17 @@ from scripts.judge import Judge
 from scripts.red_team import RedTeamAgent
 from scripts.target_interface import TargetModel
 from scripts.utils import (
+    build_character_block,
+    build_trajectory_block,
     find_existing_transcripts,
     generate_transcript_filename,
     load_config,
     load_env,
+    parse_judge_json,
     save_transcript,
     validate_config,
     validate_config_names,
+    validate_judge_scores,
 )
 
 logging.basicConfig(
@@ -35,6 +39,142 @@ PROVIDER_SLEEP = {
     "google": 3.0,
     "xai": 3.0,
 }
+
+
+FIXTURE_JUDGE_RESPONSE = json.dumps({
+    "turn_scores": [
+        {
+            "turn": i,
+            "scores": {
+                "anthropomorphism_acceptance": 1,
+                "attachment_language_reception": 1,
+                "social_substitution_validation": 0,
+                "dependency_reinforcement": 1,
+                "reassurance_loop_participation": 0,
+                "proactive_emotional_initiation": 0,
+                "identity_narrative_construction": 1,
+            },
+            "rationale": "Fixture data for dry-run validation."
+        }
+        for i in range(1, 4)
+    ],
+    "aggregate": {
+        "anthropomorphism_acceptance": 1.0,
+        "attachment_language_reception": 1.0,
+        "social_substitution_validation": 0.0,
+        "dependency_reinforcement": 1.0,
+        "reassurance_loop_participation": 0.0,
+        "proactive_emotional_initiation": 0.0,
+        "identity_narrative_construction": 1.0,
+    }
+})
+
+
+def dry_run(config: dict):
+    """Validate the entire pipeline without making any API calls."""
+    from pathlib import Path
+
+    passed = 0
+    failed = 0
+
+    def check(label: str, fn):
+        nonlocal passed, failed
+        try:
+            fn()
+            print(f"  [PASS] {label}")
+            passed += 1
+        except Exception as e:
+            print(f"  [FAIL] {label}: {e}")
+            failed += 1
+
+    print("\n=== DRY RUN: Pipeline Validation ===\n")
+
+    # 1. Config schema validation
+    print("1. Config schema validation")
+    check("validate_config()", lambda: validate_config(config))
+
+    # 2. Character blocks
+    print("\n2. Character block assembly")
+    for name, char in config["characters"].items():
+        check(f"build_character_block({name})", lambda c=char: build_character_block(c))
+
+    # 3. Trajectory blocks
+    print("\n3. Trajectory block assembly")
+    trajectories_config = {
+        "trajectories": config["trajectories"],
+        "conditions": config["conditions"],
+    }
+    for cond in config["conditions"]:
+        for stage in ["early", "middle", "late"]:
+            check(
+                f"build_trajectory_block({cond}, {stage})",
+                lambda c=cond, s=stage: build_trajectory_block(trajectories_config, c, s),
+            )
+
+    # 4. Red-team prompt template
+    print("\n4. Red-team prompt template")
+    prompts_dir = Path(__file__).parent.parent / "prompts"
+
+    def check_red_team_template():
+        with open(prompts_dir / "red_team_base.txt") as f:
+            template = f.read()
+        char_block = build_character_block(list(config["characters"].values())[0])
+        traj_block = build_trajectory_block(trajectories_config, list(config["conditions"].keys())[0], "early")
+        rendered = template.format(
+            character_block=char_block,
+            trajectory_block=traj_block,
+            current_turn=1,
+            num_turns=12,
+            stage_guidance="Test stage guidance.",
+        )
+        assert len(rendered) > 0, "Rendered template is empty"
+
+    check("red_team_base.txt renders without error", check_red_team_template)
+
+    def check_judge_prompt():
+        path = prompts_dir / "judge_system.txt"
+        assert path.exists(), f"{path} not found"
+        assert path.stat().st_size > 0, "judge_system.txt is empty"
+
+    check("judge_system.txt exists and is non-empty", check_judge_prompt)
+
+    # 5. Judge JSON parsing with fixture data
+    print("\n5. Judge JSON parsing (fixture data)")
+
+    def check_judge_parse():
+        scores = parse_judge_json(FIXTURE_JUDGE_RESPONSE)
+        validate_judge_scores(scores)
+
+    check("parse_judge_json + validate_judge_scores", check_judge_parse)
+
+    def check_judge_parse_markdown():
+        wrapped = f"```json\n{FIXTURE_JUDGE_RESPONSE}\n```"
+        scores = parse_judge_json(wrapped)
+        validate_judge_scores(scores)
+
+    check("parse markdown-wrapped JSON", check_judge_parse_markdown)
+
+    # 6. Filename generation
+    print("\n6. Filename generation")
+    characters = list(config["characters"].keys())
+    conditions = list(config["conditions"].keys())
+    targets = list(config["targets"].keys())
+    total_cells = len(characters) * len(conditions) * len(targets)
+
+    def check_filenames():
+        for char in characters:
+            for tgt in targets:
+                fn = generate_transcript_filename(char, conditions[0], tgt, "transcripts/")
+                assert fn.endswith(".json"), f"Filename does not end with .json: {fn}"
+
+    check(f"generate_transcript_filename ({len(characters)} chars x {len(targets)} targets)", check_filenames)
+
+    # Summary
+    print(f"\n=== DRY RUN COMPLETE: {passed} passed, {failed} failed ===")
+    print(f"Experimental matrix: {len(characters)} characters x {len(conditions)} conditions x {len(targets)} targets = {total_cells} cells")
+
+    if failed > 0:
+        sys.exit(1)
 
 
 def run_trial(
@@ -151,6 +291,8 @@ def main():
                         help="Use Batch API for judge scoring (50%% cost reduction, 24h turnaround)")
     parser.add_argument("--batch-status", type=str, default=None,
                         help="Check status of a batch judge job by ID")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Validate the entire pipeline without making any API calls")
     parser.add_argument("--output-dir", default="transcripts/", help="Transcript output directory")
     parser.add_argument("--results-dir", default="results/", help="Results output directory")
     args = parser.parse_args()
@@ -159,6 +301,10 @@ def main():
     config = load_config()
     validate_config(config)
     logger.info("Config validation passed")
+
+    if args.dry_run:
+        dry_run(config)
+        return
 
     if args.batch_status:
         from scripts.judge_batch import BatchJudge
