@@ -117,11 +117,16 @@ def run_trial(
     judge = Judge(config)
     scores = judge.score_transcript(transcript)
 
-    # Save results
+    # Save results — include raw responses for debugging
+    results_data = {
+        "metadata": transcript["metadata"],
+        "scores": {k: v for k, v in scores.items() if k != "_raw_responses"},
+        "raw_judge_responses": scores.get("_raw_responses", []),
+    }
     results_filepath = generate_transcript_filename(
         character_name, trajectory, target_name, results_dir
     )
-    save_transcript(scores, results_filepath)
+    save_transcript(results_data, results_filepath)
 
     # Print summary
     print("\n=== JUDGE SCORES ===")

@@ -57,47 +57,84 @@ class Judge:
                 logger.warning(f"Rate limited, waiting {wait:.0f}s (attempt {attempt + 1}/{max_retries})")
                 time.sleep(wait)
 
-    def score_transcript(self, transcript: dict) -> dict:
-        """Score a single transcript.
+    def score_transcript(self, transcript: dict, max_parse_retries: int = 2) -> dict:
+        """Score a single transcript with retry on JSON parse failure.
+
+        If the judge returns invalid JSON, retries by appending the failed response
+        and a correction prompt to the conversation, giving the judge feedback.
 
         Args:
             transcript: Dict with "metadata" and "conversation" keys.
+            max_parse_retries: Number of additional attempts on parse failure.
 
         Returns:
-            The judge's scoring dict parsed from JSON.
+            The judge's scoring dict with an extra "_raw_responses" key for debugging.
         """
         user_message = format_transcript_for_judge(
             transcript["metadata"], transcript["conversation"]
         )
 
-        # Call the judge LLM
-        response = self._call_with_retry(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            temperature=self.temperature,
-            system=[
-                {
-                    "type": "text",
-                    "text": self.system_prompt,
-                    "cache_control": {"type": "ephemeral"}
-                }
-            ],
-            messages=[{"role": "user", "content": user_message}],
-        )
+        messages = [{"role": "user", "content": user_message}]
+        raw_responses = []
 
-        usage = response.usage
-        cache_read = getattr(usage, 'cache_read_input_tokens', 0)
-        cache_creation = getattr(usage, 'cache_creation_input_tokens', 0)
-        logger.debug(
-            f"Tokens — input: {usage.input_tokens}, output: {usage.output_tokens}, "
-            f"cache_read: {cache_read}, cache_creation: {cache_creation}"
-        )
+        for attempt in range(1 + max_parse_retries):
+            response = self._call_with_retry(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                system=[
+                    {
+                        "type": "text",
+                        "text": self.system_prompt,
+                        "cache_control": {"type": "ephemeral"}
+                    }
+                ],
+                messages=messages,
+            )
 
-        if not response.content:
-            raise RuntimeError("Empty response from judge LLM")
+            usage = response.usage
+            cache_read = getattr(usage, 'cache_read_input_tokens', 0)
+            cache_creation = getattr(usage, 'cache_creation_input_tokens', 0)
+            logger.debug(
+                f"Judge tokens — input: {usage.input_tokens}, output: {usage.output_tokens}, "
+                f"cache_read: {cache_read}, cache_creation: {cache_creation}"
+            )
 
-        scores = parse_judge_json(response.content[0].text)
-        return validate_judge_scores(scores)
+            if not response.content:
+                raise RuntimeError("Empty response from judge LLM")
+
+            response_text = response.content[0].text
+            raw_responses.append(response_text)
+
+            try:
+                scores = parse_judge_json(response_text)
+                scores = validate_judge_scores(scores)
+                scores["_raw_responses"] = raw_responses
+                return scores
+            except (ValueError, Exception) as e:
+                if attempt < max_parse_retries:
+                    logger.warning(
+                        f"Judge JSON parse failed (attempt {attempt + 1}), "
+                        f"retrying with feedback: {e}"
+                    )
+                    messages.append({"role": "assistant", "content": response_text})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your previous response was not valid JSON. "
+                            "Please return ONLY the JSON object specified in "
+                            "the scoring format, with no additional text, "
+                            "no markdown formatting, and no code blocks. "
+                            "Start directly with { and end with }."
+                        )
+                    })
+                else:
+                    logger.error(
+                        f"Failed to parse judge response as JSON after "
+                        f"{max_parse_retries + 1} attempts"
+                    )
+                    logger.error(f"Last raw response:\n{response_text[:500]}")
+                    raise
 
     def score_batch(self, transcript_dir: str, output_dir: str):
         """Score all transcripts in a directory and save results.
@@ -115,8 +152,12 @@ class Judge:
 
             try:
                 scores = self.score_transcript(transcript)
+                results_data = {
+                    "scores": {k: v for k, v in scores.items() if k != "_raw_responses"},
+                    "raw_judge_responses": scores.get("_raw_responses", []),
+                }
                 output_filepath = os.path.join(output_dir, filepath.name)
-                save_transcript(scores, output_filepath)
+                save_transcript(results_data, output_filepath)
                 logger.info(f"Scores saved to {output_filepath}")
             except Exception as e:
                 logger.error(f"Failed to score {filepath.name}: {e}")
