@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 from datetime import datetime, timezone
 from itertools import product
 
@@ -11,6 +12,7 @@ from scripts.judge import Judge
 from scripts.red_team import RedTeamAgent
 from scripts.target_interface import TargetModel
 from scripts.utils import (
+    find_existing_transcripts,
     generate_transcript_filename,
     load_config,
     load_env,
@@ -24,6 +26,15 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("compass")
+
+# Seconds to sleep between turns, keyed by provider.
+# Free-tier endpoints have stricter RPM caps, so non-Anthropic providers get longer pauses.
+PROVIDER_SLEEP = {
+    "anthropic": 1.0,
+    "openai": 2.0,
+    "google": 3.0,
+    "xai": 3.0,
+}
 
 
 def run_trial(
@@ -74,6 +85,11 @@ def run_trial(
             "assistant": assistant_response,
         })
 
+        # Sleep between turns to avoid rate limiting
+        if turn < num_turns:
+            sleep_time = PROVIDER_SLEEP.get(target_config["provider"], 2.0)
+            time.sleep(sleep_time)
+
     # Build and save transcript
     transcript = {
         "metadata": {
@@ -120,7 +136,11 @@ def main():
     parser.add_argument("--trajectory", default="anthropomorphism_only", help="Trajectory condition: anthropomorphism_only, attachment_only, dependency_only, combined, control (default: anthropomorphism_only)")
     parser.add_argument("--target", default="claude-sonnet", help="Target model name (default: claude-sonnet)")
     parser.add_argument("--turns", type=int, default=12, help="Number of turns (default: 12)")
+    parser.add_argument("--runs-per-cell", type=int, default=1,
+                        help="Number of runs per character x trajectory x target cell (default: 1)")
     parser.add_argument("--run-all", action="store_true", help="Run all character x trajectory x target combinations")
+    parser.add_argument("--force", action="store_true",
+                        help="Re-run trials even if transcripts already exist")
     parser.add_argument("--judge-only", action="store_true", help="Only score existing transcripts")
     parser.add_argument("--batch-judge", action="store_true",
                         help="Use Batch API for judge scoring (50%% cost reduction, 24h turnaround)")
@@ -166,20 +186,45 @@ def main():
         conditions = list(config["conditions"].keys())
         targets = list(config["targets"].keys())
         combos = list(product(characters, conditions, targets))
+        total_runs = len(combos) * args.runs_per_cell
 
-        logger.info(f"Running all combinations: {len(characters)} characters x {len(conditions)} conditions x {len(targets)} targets = {len(combos)} trials")
+        logger.info(
+            f"Running all combinations: {len(characters)} characters x "
+            f"{len(conditions)} conditions x {len(targets)} targets "
+            f"x {args.runs_per_cell} run(s) = {total_runs} trials"
+        )
+
+        skipped = 0
+        run_items = []
+        for char, cond, tgt in combos:
+            for run_num in range(1, args.runs_per_cell + 1):
+                run_items.append((char, cond, tgt, run_num))
 
         try:
             from tqdm import tqdm
-            iterator = tqdm(combos, desc="Trials", unit="trial")
+            iterator = tqdm(run_items, desc="Trials", unit="trial")
         except ImportError:
-            iterator = combos
+            iterator = run_items
 
-        for char, cond, tgt in iterator:
+        for char, cond, tgt, run_num in iterator:
+            if not args.force:
+                existing = find_existing_transcripts(char, cond, tgt, args.output_dir)
+                if len(existing) >= run_num:
+                    logger.info(
+                        f"Skipping {char} x {cond} x {tgt} run {run_num}/{args.runs_per_cell} "
+                        f"— {len(existing)} transcript(s) exist"
+                    )
+                    skipped += 1
+                    continue
             try:
+                if args.runs_per_cell > 1:
+                    logger.info(f"Run {run_num}/{args.runs_per_cell}")
                 run_trial(config, char, cond, tgt, args.turns, args.output_dir, args.results_dir, args.batch_judge)
             except Exception as e:
-                logger.error(f"Trial failed ({char} x {cond} x {tgt}): {e}")
+                logger.error(f"Trial failed ({char} x {cond} x {tgt} run {run_num}): {e}")
+
+        if skipped:
+            logger.info(f"Skipped {skipped} trials with existing transcripts (use --force to re-run)")
     else:
         run_trial(
             config,

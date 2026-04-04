@@ -311,6 +311,13 @@ def validate_config(config: dict):
                 raise ValueError(f"'{role}' config missing '{field}'")
 
 
+def find_existing_transcripts(character: str, trajectory: str, target: str, output_dir: str) -> list[str]:
+    """Return all existing transcript filepaths for this character x trajectory x target cell."""
+    import glob
+    pattern = os.path.join(output_dir, f"{character}_{trajectory}_{target}_*.json")
+    return sorted(glob.glob(pattern))
+
+
 def generate_transcript_filename(character: str, trajectory: str, target: str, output_dir: str) -> str:
     """Generate a timestamped transcript filename."""
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
