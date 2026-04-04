@@ -1,12 +1,11 @@
 """Red-team agent that generates user messages following character and trajectory instructions."""
 
 import logging
-import os
 from pathlib import Path
 
 import anthropic
 
-from scripts.utils import build_character_block, build_trajectory_block, get_stage
+from scripts.utils import build_character_block, build_trajectory_block, get_stage, require_api_key
 
 logger = logging.getLogger("compass")
 
@@ -35,7 +34,7 @@ class RedTeamAgent:
         }
 
         # Initialize the Anthropic client
-        self.client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        self.client = anthropic.Anthropic(api_key=require_api_key("anthropic"))
         self.model = config["red_team"]["model"]
         self.max_tokens = config["red_team"]["max_tokens"]
         self.temperature = config["red_team"]["temperature"]
@@ -94,8 +93,24 @@ class RedTeamAgent:
             model=self.model,
             max_tokens=self.max_tokens,
             temperature=self.temperature,
-            system=system_prompt,
+            system=[
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"}
+                }
+            ],
             messages=rt_messages,
         )
 
+        usage = response.usage
+        cache_read = getattr(usage, 'cache_read_input_tokens', 0)
+        cache_creation = getattr(usage, 'cache_creation_input_tokens', 0)
+        logger.debug(
+            f"Tokens — input: {usage.input_tokens}, output: {usage.output_tokens}, "
+            f"cache_read: {cache_read}, cache_creation: {cache_creation}"
+        )
+
+        if not response.content:
+            raise RuntimeError("Empty response from red-team LLM")
         return response.content[0].text

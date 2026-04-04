@@ -1,13 +1,19 @@
 """Judge module that scores completed conversation transcripts."""
 
-import json
 import logging
 import os
 from pathlib import Path
 
 import anthropic
 
-from scripts.utils import load_transcript, save_transcript
+from scripts.utils import (
+    format_transcript_for_judge,
+    load_transcript,
+    parse_judge_json,
+    require_api_key,
+    save_transcript,
+    validate_judge_scores,
+)
 
 logger = logging.getLogger("compass")
 
@@ -24,7 +30,7 @@ class Judge:
             self.system_prompt = f.read()
 
         # Initialize the Anthropic client
-        self.client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        self.client = anthropic.Anthropic(api_key=require_api_key("anthropic"))
         self.model = config["judge"]["model"]
         self.max_tokens = config["judge"]["max_tokens"]
         self.temperature = config["judge"]["temperature"]
@@ -38,52 +44,38 @@ class Judge:
         Returns:
             The judge's scoring dict parsed from JSON.
         """
-        metadata = transcript["metadata"]
-        conversation = transcript["conversation"]
-
-        # Format the transcript for the judge
-        lines = [
-            "TRANSCRIPT TO EVALUATE",
-            "",
-            f"Character: {metadata['character']}",
-            f"Trajectory condition: {metadata['trajectory']}",
-            f"Target model: {metadata['target_model']}",
-            "",
-        ]
-        for turn in conversation:
-            lines.append(f"[Turn {turn['turn']}]")
-            lines.append(f"USER: {turn['user']}")
-            lines.append(f"ASSISTANT: {turn['assistant']}")
-            lines.append("")
-
-        user_message = "\n".join(lines)
+        user_message = format_transcript_for_judge(
+            transcript["metadata"], transcript["conversation"]
+        )
 
         # Call the judge LLM
         response = self.client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
             temperature=self.temperature,
-            system=self.system_prompt,
+            system=[
+                {
+                    "type": "text",
+                    "text": self.system_prompt,
+                    "cache_control": {"type": "ephemeral"}
+                }
+            ],
             messages=[{"role": "user", "content": user_message}],
         )
 
-        response_text = response.content[0].text
+        usage = response.usage
+        cache_read = getattr(usage, 'cache_read_input_tokens', 0)
+        cache_creation = getattr(usage, 'cache_creation_input_tokens', 0)
+        logger.debug(
+            f"Tokens — input: {usage.input_tokens}, output: {usage.output_tokens}, "
+            f"cache_read: {cache_read}, cache_creation: {cache_creation}"
+        )
 
-        # Parse JSON from response (handle potential markdown code blocks)
-        json_text = response_text
-        if "```json" in json_text:
-            json_text = json_text.split("```json")[1].split("```")[0]
-        elif "```" in json_text:
-            json_text = json_text.split("```")[1].split("```")[0]
+        if not response.content:
+            raise RuntimeError("Empty response from judge LLM")
 
-        try:
-            scores = json.loads(json_text.strip())
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse judge response as JSON: {e}")
-            logger.error(f"Raw response:\n{response_text}")
-            raise
-
-        return scores
+        scores = parse_judge_json(response.content[0].text)
+        return validate_judge_scores(scores)
 
     def score_batch(self, transcript_dir: str, output_dir: str):
         """Score all transcripts in a directory and save results.
