@@ -60,7 +60,10 @@ class TargetModel:
 
         # Google
         if self.provider == "google":
-            if "429" in error_str or "resource exhausted" in error_str:
+            error_type = type(error).__name__
+            if error_type in ("ResourceExhausted", "TooManyRequests"):
+                return True
+            if "429" in error_str or "resource exhausted" in error_str or "quota" in error_str:
                 return True
 
         # Fallback: check common rate-limit phrases
@@ -176,16 +179,40 @@ class TargetModel:
             return response.choices[0].message.content
 
         elif self.provider == "google":
+            import google.generativeai as genai
+
+            # Build history in Gemini format
+            # Gemini uses "user" and "model" roles (not "assistant")
+            # Parts can be a string or list of dicts depending on SDK version
             gemini_history = []
             for msg in conversation_history:
                 role = "model" if msg["role"] == "assistant" else "user"
-                gemini_history.append({"role": role, "parts": [{"text": msg["content"]}]})
+                gemini_history.append({"role": role, "parts": msg["content"]})
+
             model = self.client.GenerativeModel(self.model)
-            chat = model.start_chat(history=gemini_history[:-1])
-            response = chat.send_message(
-                gemini_history[-1]["parts"][0]["text"],
-                generation_config={"max_output_tokens": self.max_tokens, "temperature": self.temperature},
-            )
+
+            # If there's only one message, don't use chat history
+            if len(gemini_history) == 1:
+                response = model.generate_content(
+                    gemini_history[0]["parts"],
+                    generation_config=genai.GenerationConfig(
+                        max_output_tokens=self.max_tokens,
+                        temperature=self.temperature,
+                    ),
+                )
+            else:
+                # start_chat expects history WITHOUT the current message
+                chat = model.start_chat(history=gemini_history[:-1])
+                response = chat.send_message(
+                    gemini_history[-1]["parts"],
+                    generation_config=genai.GenerationConfig(
+                        max_output_tokens=self.max_tokens,
+                        temperature=self.temperature,
+                    ),
+                )
+
+            if not response.text:
+                raise RuntimeError(f"Empty response from {self.provider}/{self.model}")
             return response.text
 
         else:
