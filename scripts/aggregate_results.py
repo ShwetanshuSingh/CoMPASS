@@ -17,13 +17,32 @@ logger = logging.getLogger("compass")
 
 
 def load_results(results_dir: str) -> list[dict]:
-    """Load all result JSON files from the results directory."""
+    """Load all result JSON files, normalizing old and new formats."""
     results_path = Path(results_dir)
     results = []
     for filepath in sorted(results_path.glob("*.json")):
+        if filepath.name == ".gitkeep":
+            continue
         with open(filepath) as f:
             data = json.load(f)
-            results.append(data)
+
+        # Normalize: new format nests scores under "scores" key
+        # and metadata under "metadata" key
+        if "scores" in data and "turn_scores" in data["scores"]:
+            normalized = data["scores"].copy()
+            # Prefer "metadata" over "trial_metadata" inside scores
+            if "metadata" in data:
+                normalized["trial_metadata"] = data["metadata"]
+            elif "trial_metadata" not in normalized:
+                normalized["trial_metadata"] = {}
+        elif "turn_scores" in data:
+            # Old format: everything at top level
+            normalized = data
+        else:
+            logger.warning(f"Skipping {filepath.name}: unrecognized format")
+            continue
+
+        results.append(normalized)
     return results
 
 
