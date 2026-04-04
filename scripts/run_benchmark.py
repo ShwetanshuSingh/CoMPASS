@@ -15,6 +15,7 @@ from scripts.utils import (
     load_config,
     load_env,
     save_transcript,
+    validate_config,
     validate_config_names,
 )
 
@@ -131,6 +132,8 @@ def main():
 
     load_env()
     config = load_config()
+    validate_config(config)
+    logger.info("Config validation passed")
 
     if args.batch_status:
         from scripts.judge_batch import BatchJudge

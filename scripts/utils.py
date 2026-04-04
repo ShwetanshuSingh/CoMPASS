@@ -225,6 +225,92 @@ def validate_judge_scores(scores: dict) -> dict:
     return scores
 
 
+def validate_config(config: dict):
+    """Validate all config files have required fields. Raises ValueError on first error."""
+
+    # Required character fields
+    REQUIRED_CHARACTER_FIELDS = [
+        "name", "age", "gender", "background",
+        "communication_style", "entry_point", "opening_message"
+    ]
+
+    if "characters" not in config or not config["characters"]:
+        raise ValueError("No characters defined in config")
+
+    for char_name, char_data in config["characters"].items():
+        for field in REQUIRED_CHARACTER_FIELDS:
+            if field not in char_data or not char_data[field]:
+                raise ValueError(
+                    f"Character '{char_name}' is missing required field '{field}'"
+                )
+
+    # Required trajectory fields
+    REQUIRED_TRAJECTORY_DIMS = ["anthropomorphism", "attachment", "dependency"]
+
+    if "trajectories" not in config or not config["trajectories"]:
+        raise ValueError("No trajectories defined in config")
+
+    for dim in REQUIRED_TRAJECTORY_DIMS:
+        if dim not in config["trajectories"]:
+            raise ValueError(f"Missing trajectory dimension '{dim}'")
+        traj = config["trajectories"][dim]
+        if "positive_instructions" not in traj:
+            raise ValueError(f"Trajectory '{dim}' missing 'positive_instructions'")
+        if "negative_instructions" not in traj:
+            raise ValueError(f"Trajectory '{dim}' missing 'negative_instructions'")
+        pos = traj["positive_instructions"]
+        if "general" not in pos:
+            raise ValueError(f"Trajectory '{dim}' positive_instructions missing 'general'")
+        for stage in ["early", "middle", "late"]:
+            if stage not in pos:
+                raise ValueError(
+                    f"Trajectory '{dim}' positive_instructions missing stage '{stage}'"
+                )
+
+    # Required condition fields
+    if "conditions" not in config or not config["conditions"]:
+        raise ValueError("No conditions defined in config")
+
+    for cond_name, cond_data in config["conditions"].items():
+        for dim in REQUIRED_TRAJECTORY_DIMS:
+            if dim not in cond_data:
+                raise ValueError(
+                    f"Condition '{cond_name}' missing dimension '{dim}'"
+                )
+            if cond_data[dim] not in ("positive", "negative"):
+                raise ValueError(
+                    f"Condition '{cond_name}' dimension '{dim}' must be "
+                    f"'positive' or 'negative', got '{cond_data[dim]}'"
+                )
+
+    # Required target fields
+    if "targets" not in config or not config["targets"]:
+        raise ValueError("No targets defined in config")
+
+    REQUIRED_TARGET_FIELDS = ["provider", "model", "max_tokens", "temperature"]
+    VALID_PROVIDERS = ["anthropic", "openai", "google", "xai"]
+
+    for target_name, target_data in config["targets"].items():
+        for field in REQUIRED_TARGET_FIELDS:
+            if field not in target_data:
+                raise ValueError(
+                    f"Target '{target_name}' missing required field '{field}'"
+                )
+        if target_data["provider"] not in VALID_PROVIDERS:
+            raise ValueError(
+                f"Target '{target_name}' has unknown provider "
+                f"'{target_data['provider']}'. Valid: {VALID_PROVIDERS}"
+            )
+
+    # Red-team and judge config
+    for role in ["red_team", "judge"]:
+        if role not in config:
+            raise ValueError(f"Missing '{role}' config section")
+        for field in ["model", "max_tokens", "temperature"]:
+            if field not in config[role]:
+                raise ValueError(f"'{role}' config missing '{field}'")
+
+
 def generate_transcript_filename(character: str, trajectory: str, target: str, output_dir: str) -> str:
     """Generate a timestamped transcript filename."""
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
