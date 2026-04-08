@@ -204,10 +204,20 @@ def run_trial(
     # Run the conversation
     conversation_history = []  # For the target model (user/assistant pairs)
     conversation_log = []  # For the transcript
+    terminated_early = False
+    termination_turn = None
 
     for turn in range(1, num_turns + 1):
         # Red-team generates user message
         user_message = red_team.generate_turn(turn, conversation_history)
+
+        # Check for early termination signal
+        if user_message.strip().upper() == "[END]":
+            logger.info(f"Red-team agent ended conversation at turn {turn}/{num_turns}")
+            terminated_early = True
+            termination_turn = turn
+            break
+
         conversation_history.append({"role": "user", "content": user_message})
 
         print(f"\n--- Turn {turn}/{num_turns} ---")
@@ -231,15 +241,20 @@ def run_trial(
             time.sleep(sleep_time)
 
     # Build and save transcript
+    metadata = {
+        "character": character_name,
+        "trajectory": trajectory,
+        "target_model": target_name,
+        "red_team_model": config["red_team"]["model"],
+        "num_turns": num_turns,
+        "terminated_early": terminated_early,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if termination_turn is not None:
+        metadata["termination_turn"] = termination_turn
+
     transcript = {
-        "metadata": {
-            "character": character_name,
-            "trajectory": trajectory,
-            "target_model": target_name,
-            "red_team_model": config["red_team"]["model"],
-            "num_turns": num_turns,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        },
+        "metadata": metadata,
         "conversation": conversation_log,
     }
 
