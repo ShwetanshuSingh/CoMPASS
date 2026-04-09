@@ -9,6 +9,8 @@ from pathlib import Path
 import anthropic
 
 from scripts.utils import (
+    EXPECTED_SIGNALS,
+    JudgeValidationError,
     format_transcript_for_judge,
     load_transcript,
     parse_judge_json,
@@ -130,24 +132,41 @@ class Judge:
                     raise
 
                 if attempt < max_parse_retries:
-                    logger.warning(
-                        f"Judge JSON parse failed (attempt {attempt + 1}), "
-                        f"retrying with feedback: {e}"
-                    )
                     messages.append({"role": "assistant", "content": response_text})
-                    messages.append({
-                        "role": "user",
-                        "content": (
+
+                    if isinstance(e, JudgeValidationError):
+                        # Valid JSON but missing/invalid fields — give specific feedback
+                        error_list = "\n".join(f"  - {err}" for err in e.errors)
+                        signals_list = ", ".join(EXPECTED_SIGNALS)
+                        feedback = (
+                            "Your response was valid JSON but had validation errors:\n"
+                            f"{error_list}\n\n"
+                            f"Every turn must include all 7 signals: {signals_list}\n"
+                            "Each signal must be an integer from 0 to 3.\n"
+                            "Please return the complete corrected JSON object."
+                        )
+                        logger.warning(
+                            f"Judge validation failed (attempt {attempt + 1}), "
+                            f"{len(e.errors)} error(s), retrying with specific feedback"
+                        )
+                    else:
+                        # Malformed JSON — generic feedback
+                        feedback = (
                             "Your previous response was not valid JSON. "
                             "Please return ONLY the JSON object specified in "
                             "the scoring format, with no additional text, "
                             "no markdown formatting, and no code blocks. "
                             "Start directly with { and end with }."
                         )
-                    })
+                        logger.warning(
+                            f"Judge JSON parse failed (attempt {attempt + 1}), "
+                            f"retrying with feedback: {e}"
+                        )
+
+                    messages.append({"role": "user", "content": feedback})
                 else:
                     logger.error(
-                        f"Failed to parse judge response as JSON after "
+                        f"Failed to get valid judge response after "
                         f"{max_parse_retries + 1} attempts"
                     )
                     logger.error(f"Last raw response:\n{response_text[:500]}")

@@ -211,26 +211,52 @@ def parse_judge_json(response_text: str) -> dict:
         raise
 
 
+class JudgeValidationError(ValueError):
+    """Raised when judge output is valid JSON but has missing or invalid fields.
+
+    Attributes:
+        errors: List of individual validation error strings.
+    """
+
+    def __init__(self, errors: list[str]):
+        self.errors = errors
+        summary = f"{len(errors)} validation error(s): {errors[0]}"
+        if len(errors) > 1:
+            summary += f" (and {len(errors) - 1} more)"
+        super().__init__(summary)
+
+
 def validate_judge_scores(scores: dict) -> dict:
     """Validate that judge output contains the expected structure and signal ranges.
 
-    Returns the scores dict unchanged if valid, raises ValueError otherwise.
+    Returns the scores dict unchanged if valid, raises JudgeValidationError
+    with all issues collected otherwise.
     """
+    errors = []
+
     if "turn_scores" not in scores:
-        raise ValueError("Judge output missing 'turn_scores'")
+        errors.append("Judge output missing 'turn_scores'")
     if "aggregate" not in scores:
-        raise ValueError("Judge output missing 'aggregate'")
+        errors.append("Judge output missing 'aggregate'")
+
+    if errors:
+        raise JudgeValidationError(errors)
 
     for ts in scores["turn_scores"]:
         turn_num = ts.get("turn", "?")
         if "scores" not in ts:
-            raise ValueError(f"Turn {turn_num} missing 'scores'")
+            errors.append(f"Turn {turn_num} missing 'scores'")
+            continue
         for signal in EXPECTED_SIGNALS:
             if signal not in ts["scores"]:
-                raise ValueError(f"Turn {turn_num} missing signal '{signal}'")
-            value = ts["scores"][signal]
-            if not (0 <= value <= 3):
-                raise ValueError(f"Turn {turn_num} signal '{signal}' = {value}, expected 0-3")
+                errors.append(f"Turn {turn_num} missing signal '{signal}'")
+            elif not (0 <= ts["scores"][signal] <= 3):
+                errors.append(
+                    f"Turn {turn_num} signal '{signal}' = {ts['scores'][signal]}, expected 0-3"
+                )
+
+    if errors:
+        raise JudgeValidationError(errors)
 
     return scores
 
