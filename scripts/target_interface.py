@@ -61,9 +61,8 @@ class TargetModel:
             import openai
             return openai.OpenAI(api_key=require_api_key("openai"))
         elif self.provider == "google":
-            import google.generativeai as genai
-            genai.configure(api_key=require_api_key("google"))
-            return genai
+            from google import genai
+            return genai.Client(api_key=require_api_key("google"))
         elif self.provider == "xai":
             import openai
             return openai.OpenAI(api_key=require_api_key("xai"), base_url="https://api.x.ai/v1")
@@ -194,12 +193,19 @@ class TargetModel:
             return response.content[0].text
 
         elif self.provider in ("openai", "xai"):
+            # Newer OpenAI models (gpt-5+) require max_completion_tokens;
+            # xAI and older OpenAI models use max_tokens.
+            if self.provider == "openai":
+                token_param = {"max_completion_tokens": self.max_tokens}
+            else:
+                token_param = {"max_tokens": self.max_tokens}
+
             try:
                 raw = self.client.chat.completions.with_raw_response.create(
                     model=self.model,
-                    max_tokens=self.max_tokens,
                     temperature=self.temperature,
                     messages=conversation_history,
+                    **token_param,
                 )
                 logger.debug(
                     f"Rate limits ({self.provider}): "
@@ -211,12 +217,18 @@ class TargetModel:
                 # Fallback if with_raw_response not available in SDK version
                 response = self.client.chat.completions.create(
                     model=self.model,
-                    max_tokens=self.max_tokens,
                     temperature=self.temperature,
                     messages=conversation_history,
+                    **token_param,
                 )
             if not response.choices:
                 raise RuntimeError(f"Empty response from {self.provider}/{self.model}")
+            content = response.choices[0].message.content
+            if not content:
+                raise RuntimeError(
+                    f"Empty content from {self.provider}/{self.model} "
+                    f"(finish_reason={response.choices[0].finish_reason})"
+                )
             if response.usage:
                 self.total_input_tokens += response.usage.prompt_tokens
                 self.total_output_tokens += response.usage.completion_tokens
@@ -225,54 +237,75 @@ class TargetModel:
                     f"in={response.usage.prompt_tokens}, out={response.usage.completion_tokens}, "
                     f"cumulative={self.total_tokens}"
                 )
-            return response.choices[0].message.content
+            return content
 
         elif self.provider == "google":
-            import google.generativeai as genai
+            from google.genai import types
 
-            # Build history in Gemini format
-            # Gemini uses "user" and "model" roles (not "assistant")
-            # Parts can be a string or list of dicts depending on SDK version
-            gemini_history = []
+            # Build contents in Gemini format
+            contents = []
             for msg in conversation_history:
                 role = "model" if msg["role"] == "assistant" else "user"
-                gemini_history.append({"role": role, "parts": msg["content"]})
+                contents.append(types.Content(
+                    role=role,
+                    parts=[types.Part(text=msg["content"])],
+                ))
 
-            model = self.client.GenerativeModel(self.model)
+            # Disable safety filters for research use — the benchmark
+            # intentionally probes parasocial attachment behaviors.
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    max_output_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    safety_settings=[
+                        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="OFF"),
+                        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="OFF"),
+                        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="OFF"),
+                        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="OFF"),
+                    ],
+                ),
+            )
 
-            # If there's only one message, don't use chat history
-            if len(gemini_history) == 1:
-                response = model.generate_content(
-                    gemini_history[0]["parts"],
-                    generation_config=genai.GenerationConfig(
-                        max_output_tokens=self.max_tokens,
-                        temperature=self.temperature,
-                    ),
+            # Check for safety-filtered or empty responses
+            if not response.candidates:
+                raise RuntimeError(
+                    f"No candidates returned from {self.provider}/{self.model}. "
+                    f"The prompt may have been blocked by safety filters."
                 )
-            else:
-                # start_chat expects history WITHOUT the current message
-                chat = model.start_chat(history=gemini_history[:-1])
-                response = chat.send_message(
-                    gemini_history[-1]["parts"],
-                    generation_config=genai.GenerationConfig(
-                        max_output_tokens=self.max_tokens,
-                        temperature=self.temperature,
-                    ),
+            candidate = response.candidates[0]
+            finish_reason = candidate.finish_reason
+            if finish_reason and finish_reason.name not in ("STOP", "MAX_TOKENS"):
+                if not candidate.content or not candidate.content.parts:
+                    raise RuntimeError(
+                        f"Response from {self.provider}/{self.model} was blocked "
+                        f"(finish_reason={finish_reason.name}). No content returned."
+                    )
+                logger.warning(
+                    f"Response from {self.provider}/{self.model} has "
+                    f"finish_reason={finish_reason.name} but partial content was returned."
                 )
-
-            if not response.text:
+            text = response.text
+            if not text:
                 raise RuntimeError(f"Empty response from {self.provider}/{self.model}")
-            # Google SDK doesn't always expose token counts; estimate with tiktoken
-            input_tokens = self._count_message_tokens(conversation_history)
-            output_tokens = self._count_tokens(response.text)
+
+            # Use native token counts when available, fall back to tiktoken
+            usage = response.usage_metadata
+            if usage and usage.candidates_token_count:
+                input_tokens = usage.prompt_token_count or 0
+                output_tokens = usage.candidates_token_count or 0
+            else:
+                input_tokens = self._count_message_tokens(conversation_history)
+                output_tokens = self._count_tokens(text)
             self.total_input_tokens += input_tokens
             self.total_output_tokens += output_tokens
             logger.debug(
-                f"Tokens ({self.provider}/{self.model}, estimated): "
-                f"in≈{input_tokens}, out≈{output_tokens}, "
+                f"Tokens ({self.provider}/{self.model}): "
+                f"in={input_tokens}, out={output_tokens}, "
                 f"cumulative={self.total_tokens}"
             )
-            return response.text
+            return text
 
         else:
             raise NotImplementedError(f"Provider {self.provider} not implemented")
