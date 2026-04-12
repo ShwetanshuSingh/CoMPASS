@@ -13,11 +13,12 @@ logger = logging.getLogger("compass")
 class TargetModel:
     """Interface for sending messages to target models being evaluated."""
 
-    def __init__(self, provider: str, model: str, max_tokens: int, temperature: float):
+    def __init__(self, provider: str, model: str, max_tokens: int, temperature: float, thinking: bool = True):
         self.provider = provider
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.thinking = thinking
         self.client = self._init_client()
 
         # Token usage tracking
@@ -253,19 +254,26 @@ class TargetModel:
 
             # Disable safety filters for research use — the benchmark
             # intentionally probes parasocial attachment behaviors.
+            config_kwargs = dict(
+                max_output_tokens=self.max_tokens,
+                temperature=self.temperature,
+                safety_settings=[
+                    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="OFF"),
+                    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="OFF"),
+                    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="OFF"),
+                    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="OFF"),
+                ],
+            )
+
+            # Disable thinking/reasoning to prevent thinking tokens from
+            # consuming the output budget and producing empty responses.
+            if not self.thinking:
+                config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+
             response = self.client.models.generate_content(
                 model=self.model,
                 contents=contents,
-                config=types.GenerateContentConfig(
-                    max_output_tokens=self.max_tokens,
-                    temperature=self.temperature,
-                    safety_settings=[
-                        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="OFF"),
-                        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="OFF"),
-                        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="OFF"),
-                        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="OFF"),
-                    ],
-                ),
+                config=types.GenerateContentConfig(**config_kwargs),
             )
 
             # Check for safety-filtered or empty responses
