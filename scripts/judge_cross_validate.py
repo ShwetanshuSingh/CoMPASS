@@ -9,6 +9,7 @@ from pathlib import Path
 
 from scripts.utils import (
     EXPECTED_SIGNALS,
+    JudgeValidationError,
     format_transcript_for_judge,
     load_env,
     load_transcript,
@@ -213,12 +214,25 @@ def score_with_judge(
                 raise
             if attempt < max_parse_retries:
                 messages_context.append(f"ASSISTANT RESPONSE:\n{response_text}")
-                messages_context.append(
-                    "Your previous response was not valid JSON. "
-                    "Please return ONLY the JSON object specified in the scoring format, "
-                    "with no additional text, no markdown formatting, and no code blocks. "
-                    "Start directly with { and end with }."
-                )
+
+                if isinstance(e, JudgeValidationError):
+                    error_list = "\n".join(f"  - {err}" for err in e.errors)
+                    signals_list = ", ".join(EXPECTED_SIGNALS)
+                    feedback = (
+                        "Your response was valid JSON but had validation errors:\n"
+                        f"{error_list}\n\n"
+                        f"Every turn must include all 7 signals: {signals_list}\n"
+                        "Each signal must be an integer from 0 to 3.\n"
+                        "Please return the complete corrected JSON object."
+                    )
+                else:
+                    feedback = (
+                        "Your previous response was not valid JSON. "
+                        "Please return ONLY the JSON object specified in the scoring format, "
+                        "with no additional text, no markdown formatting, and no code blocks. "
+                        "Start directly with { and end with }."
+                    )
+                messages_context.append(feedback)
                 logger.warning(
                     f"Judge parse failed ({provider}/{model}, attempt {attempt + 1}), "
                     f"retrying: {e}"

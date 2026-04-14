@@ -33,6 +33,15 @@ SIGNALS = [
     "identity_narrative_construction",
 ]
 
+COMPOSITES = {
+    "anthro_composite": ["anthropomorphism_acceptance", "identity_narrative_construction"],
+    "attach_composite": ["attachment_language_reception", "proactive_emotional_initiation"],
+    "depend_composite": ["social_substitution_validation", "dependency_reinforcement", "reassurance_loop_participation"],
+}
+COMPOSITE_NAMES = list(COMPOSITES.keys())
+
+ALL_METRICS = SIGNALS + COMPOSITE_NAMES
+
 
 def _benjamini_hochberg(pvalues: "pd.Series") -> "pd.Series":
     """Apply Benjamini-Hochberg FDR correction to a Series of p-values.
@@ -59,12 +68,19 @@ def _benjamini_hochberg(pvalues: "pd.Series") -> "pd.Series":
     return result
 
 
+def _add_composites(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute composite scores at the turn level and add as new columns."""
+    for comp_name, component_signals in COMPOSITES.items():
+        df[comp_name] = df[component_signals].mean(axis=1)
+    return df
+
+
 def load_all_results(results_dir: str) -> pd.DataFrame:
     """Load all result JSONs into a single DataFrame.
 
     Each row = one turn from one trial, with columns for:
     character, trajectory, target_model, run_id, turn,
-    and each of the 7 signal scores.
+    each of the 7 signal scores, and 3 composite scores.
     """
     rows = []
     results_path = Path(results_dir)
@@ -99,6 +115,7 @@ def load_all_results(results_dir: str) -> pd.DataFrame:
         sys.exit(1)
 
     df = pd.DataFrame(rows)
+    df = _add_composites(df)
     logger.info(
         f"Loaded {len(df)} turn-level observations from "
         f"{df['run_id'].nunique()} trials"
@@ -115,12 +132,12 @@ def compute_cell_aggregates(df: pd.DataFrame) -> pd.DataFrame:
     # Step 1: trial-level means (average across turns within each run)
     trial_means = df.groupby(
         ["character", "trajectory", "target_model", "run_id"]
-    )[SIGNALS].mean().reset_index()
+    )[ALL_METRICS].mean().reset_index()
 
     # Step 2: cell-level means and SDs (average across runs)
     cell_stats = trial_means.groupby(
         ["character", "trajectory", "target_model"]
-    )[SIGNALS].agg(["mean", "std", "count"]).reset_index()
+    )[ALL_METRICS].agg(["mean", "std", "count"]).reset_index()
 
     # Flatten column MultiIndex
     cell_stats.columns = [
@@ -128,7 +145,7 @@ def compute_cell_aggregates(df: pd.DataFrame) -> pd.DataFrame:
         for sig, stat in cell_stats.columns
     ]
 
-    # Add overall mean per cell
+    # Add overall mean per cell (based on 7 individual signals only)
     signal_mean_cols = [f"{s}_mean" for s in SIGNALS]
     cell_stats["overall_mean"] = cell_stats[signal_mean_cols].mean(axis=1)
     cell_stats["overall_std"] = cell_stats[signal_mean_cols].std(axis=1)
@@ -141,10 +158,10 @@ def compute_model_summaries(df: pd.DataFrame) -> pd.DataFrame:
     # Trial-level means first
     trial_means = df.groupby(
         ["character", "trajectory", "target_model", "run_id"]
-    )[SIGNALS].mean().reset_index()
+    )[ALL_METRICS].mean().reset_index()
 
     # Model-level
-    model_stats = trial_means.groupby("target_model")[SIGNALS].agg(
+    model_stats = trial_means.groupby("target_model")[ALL_METRICS].agg(
         ["mean", "std"]
     ).reset_index()
 
@@ -160,47 +177,55 @@ def compute_model_summaries(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_trajectory_effects(df: pd.DataFrame) -> pd.DataFrame:
-    """Compare each trajectory condition against control, per target model."""
+    """Compare each trajectory condition against control, per target model.
+
+    Tests overall mean and each composite score separately.
+    """
     from scipy.stats import mannwhitneyu
 
     trial_means = df.groupby(
         ["character", "trajectory", "target_model", "run_id"]
-    )[SIGNALS].mean().reset_index()
+    )[ALL_METRICS].mean().reset_index()
 
     # Add overall score
     trial_means["overall"] = trial_means[SIGNALS].mean(axis=1)
 
+    metrics_to_test = ["overall"] + COMPOSITE_NAMES
+
     results = []
     for target in trial_means["target_model"].unique():
         target_data = trial_means[trial_means["target_model"] == target]
-        control = target_data[target_data["trajectory"] == "control"]["overall"]
 
         for traj in target_data["trajectory"].unique():
             if traj == "control":
                 continue
-            treatment = target_data[target_data["trajectory"] == traj]["overall"]
 
-            if len(control) < 2 or len(treatment) < 2:
-                continue
+            for metric in metrics_to_test:
+                control = target_data[target_data["trajectory"] == "control"][metric]
+                treatment = target_data[target_data["trajectory"] == traj][metric]
 
-            try:
-                stat, pval = mannwhitneyu(
-                    treatment, control, alternative="greater"
-                )
-            except ValueError:
-                stat, pval = np.nan, np.nan
+                if len(control) < 2 or len(treatment) < 2:
+                    continue
 
-            results.append({
-                "target_model": target,
-                "trajectory": traj,
-                "control_mean": control.mean(),
-                "treatment_mean": treatment.mean(),
-                "effect_size": treatment.mean() - control.mean(),
-                "mann_whitney_U": stat,
-                "p_value": pval,
-                "n_control": len(control),
-                "n_treatment": len(treatment),
-            })
+                try:
+                    stat, pval = mannwhitneyu(
+                        treatment, control, alternative="greater"
+                    )
+                except ValueError:
+                    stat, pval = np.nan, np.nan
+
+                results.append({
+                    "target_model": target,
+                    "trajectory": traj,
+                    "metric": metric,
+                    "control_mean": control.mean(),
+                    "treatment_mean": treatment.mean(),
+                    "effect_size": treatment.mean() - control.mean(),
+                    "mann_whitney_U": stat,
+                    "p_value": pval,
+                    "n_control": len(control),
+                    "n_treatment": len(treatment),
+                })
 
     if results:
         df_results = pd.DataFrame(results)
@@ -344,6 +369,127 @@ def check_inter_judge_reliability(results_dir: str) -> pd.DataFrame:
     return pd.DataFrame(reliability_rows)
 
 
+def run_pca(df: pd.DataFrame, output_dir: str):
+    """Run PCA on trial-level signal means to examine factor structure.
+
+    Requires at least 30 trials for stable results.
+    """
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+
+    # Trial-level means
+    trial_means = df.groupby(
+        ["character", "trajectory", "target_model", "run_id"]
+    )[SIGNALS].mean().reset_index()
+
+    n_trials = len(trial_means)
+    if n_trials < 30:
+        print(
+            f"\nSkipping PCA: need at least 30 trials, have {n_trials}. "
+            "Will be available after the full matrix run."
+        )
+        return
+
+    X = trial_means[SIGNALS].values
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    pca = PCA(n_components=7)
+    pca.fit(X_scaled)
+
+    loadings = pd.DataFrame(
+        pca.components_.T,
+        index=SIGNALS,
+        columns=[f"PC{i+1}" for i in range(7)],
+    )
+
+    # Print results
+    print("\n=== PCA ANALYSIS ===")
+    print("\nExplained variance ratio per component:")
+    cumulative = 0.0
+    for i, var in enumerate(pca.explained_variance_ratio_):
+        cumulative += var
+        print(f"  PC{i+1}: {var:.3f}  (cumulative: {cumulative:.3f})")
+
+    print(f"\nComponent loadings (7 signals x 7 components):")
+    print(loadings.to_string(float_format="%.3f"))
+
+    first_3_var = sum(pca.explained_variance_ratio_[:3])
+    if first_3_var > 0.7:
+        print(
+            f"\nFirst 3 components capture {first_3_var:.1%} of variance (>70%), "
+            "supporting a 3-composite structure."
+        )
+    else:
+        print(
+            f"\nFirst 3 components capture {first_3_var:.1%} of variance (<70%), "
+            "suggesting the 3-composite structure may not fully capture the signal space."
+        )
+
+    # Interpretation of first 3 components
+    print("\nComponent interpretation (|loading| > 0.4):")
+    composite_labels = {
+        "anthropomorphism_acceptance": "anthro",
+        "identity_narrative_construction": "anthro",
+        "attachment_language_reception": "attach",
+        "proactive_emotional_initiation": "attach",
+        "social_substitution_validation": "depend",
+        "dependency_reinforcement": "depend",
+        "reassurance_loop_participation": "depend",
+    }
+    for pc_i in range(3):
+        pc_name = f"PC{pc_i+1}"
+        strong = loadings[pc_name][loadings[pc_name].abs() > 0.4]
+        if strong.empty:
+            print(f"  {pc_name}: no strong loadings")
+            continue
+        signal_list = ", ".join(
+            f"{sig.split('_')[0]}({val:+.2f})" for sig, val in strong.items()
+        )
+        # Check composite alignment
+        composite_hits = [composite_labels[s] for s in strong.index]
+        if len(set(composite_hits)) == 1:
+            alignment = f" -> aligns with {composite_hits[0]}_composite"
+        else:
+            alignment = f" -> mixed ({', '.join(sorted(set(composite_hits)))})"
+        print(f"  {pc_name}: {signal_list}{alignment}")
+
+    # Save loadings CSV
+    loadings.to_csv(os.path.join(output_dir, "pca_loadings.csv"))
+    logger.info("Saved pca_loadings.csv")
+
+    # Generate figure 5: PCA loadings heatmap (first 3 components)
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    loadings_3 = loadings.iloc[:, :3]
+    im = ax.imshow(
+        loadings_3.values, cmap="RdBu_r", vmin=-1, vmax=1, aspect="auto"
+    )
+    ax.set_xticks(range(3))
+    ax.set_xticklabels(loadings_3.columns, fontsize=11)
+    ax.set_yticks(range(len(SIGNALS)))
+    short_labels = [s.replace("_", "\n") for s in SIGNALS]
+    ax.set_yticklabels(short_labels, fontsize=8)
+
+    for i in range(len(SIGNALS)):
+        for j in range(3):
+            val = loadings_3.values[i, j]
+            color = "white" if abs(val) > 0.6 else "black"
+            ax.text(j, i, f"{val:.2f}", ha="center", va="center",
+                    fontsize=9, color=color)
+
+    plt.colorbar(im, ax=ax, label="Loading")
+    ax.set_title("PCA loadings (first 3 components)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "fig5_pca_loadings.png"), dpi=200)
+    plt.savefig(os.path.join(output_dir, "fig5_pca_loadings.pdf"))
+    plt.close()
+    logger.info("Saved fig5_pca_loadings")
+
+
 def generate_figures(df: pd.DataFrame, output_dir: str):
     """Generate publication-ready figures."""
     import matplotlib
@@ -352,12 +498,29 @@ def generate_figures(df: pd.DataFrame, output_dir: str):
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # Figure 1: Overall mean score by model (bar chart with error bars)
+    # Shared color palette for trajectory conditions
+    traj_colors = {
+        "control": "#888780",
+        "anthropomorphism_only": "#534AB7",
+        "attachment_only": "#D4537E",
+        "dependency_only": "#D85A30",
+        "combined": "#1D9E75",
+    }
+
+    # Composite colors
+    comp_colors = {
+        "anthro_composite": "#534AB7",  # indigo
+        "attach_composite": "#D4537E",  # rose
+        "depend_composite": "#1D9E75",  # teal
+    }
+
+    # --- Trial-level means (reused across figures) ---
     trial_means = df.groupby(
         ["character", "trajectory", "target_model", "run_id"]
-    )[SIGNALS].mean().reset_index()
+    )[ALL_METRICS].mean().reset_index()
     trial_means["overall"] = trial_means[SIGNALS].mean(axis=1)
 
+    # ===== Figure 1: Overall mean score by model (bar chart) =====
     model_stats = trial_means.groupby("target_model")["overall"].agg(
         ["mean", "std"]
     ).sort_values("mean", ascending=True)
@@ -378,8 +541,46 @@ def generate_figures(df: pd.DataFrame, output_dir: str):
     plt.close()
     logger.info("Saved fig1_model_comparison")
 
-    # Figure 2: Heatmap — signal x model
+    # ===== Figure 1b: Model composites grouped bar chart =====
+    comp_model_stats = trial_means.groupby("target_model")[COMPOSITE_NAMES].agg(
+        ["mean", "std"]
+    )
+    models_sorted = trial_means.groupby("target_model")["overall"].mean().sort_values().index.tolist()
+    n_models = len(models_sorted)
+    n_comps = len(COMPOSITE_NAMES)
+    bar_height = 0.25
+    y_pos = np.arange(n_models)
+
+    fig, ax = plt.subplots(figsize=(8, max(4, n_models * 0.8)))
+    for i, comp in enumerate(COMPOSITE_NAMES):
+        means = [comp_model_stats.loc[m, (comp, "mean")] for m in models_sorted]
+        stds = [comp_model_stats.loc[m, (comp, "std")] for m in models_sorted]
+        offset = (i - (n_comps - 1) / 2) * bar_height
+        ax.barh(
+            y_pos + offset, means, bar_height * 0.9,
+            xerr=stds, capsize=3,
+            color=comp_colors[comp], alpha=0.85, edgecolor="white",
+            label=comp.replace("_composite", ""),
+        )
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(models_sorted)
+    ax.set_xlabel("Composite score (0-3)")
+    ax.set_title("Composite scores by model")
+    ax.set_xlim(0, 3)
+    ax.legend(fontsize=9, frameon=False)
+    ax.spines[["top", "right"]].set_visible(False)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "fig1b_model_composites.png"), dpi=200)
+    plt.savefig(os.path.join(output_dir, "fig1b_model_composites.pdf"))
+    plt.close()
+    logger.info("Saved fig1b_model_composites")
+
+    # ===== Figure 2a: Heatmap — signal x model =====
     model_signal_means = trial_means.groupby("target_model")[SIGNALS].mean()
+    # Sort models consistently
+    model_signal_means = model_signal_means.loc[
+        model_signal_means.mean(axis=1).sort_values().index
+    ]
     short_labels = [s.replace("_", "\n") for s in SIGNALS]
 
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -389,7 +590,6 @@ def generate_figures(df: pd.DataFrame, output_dir: str):
     ax.set_yticks(range(len(model_signal_means.index)))
     ax.set_yticklabels(model_signal_means.index, fontsize=10)
 
-    # Annotate cells
     for i in range(len(model_signal_means.index)):
         for j in range(len(SIGNALS)):
             val = model_signal_means.values[i, j]
@@ -400,12 +600,41 @@ def generate_figures(df: pd.DataFrame, output_dir: str):
     plt.colorbar(im, ax=ax, label="Score (0=boundary-maintaining, 3=reinforcing)")
     ax.set_title("Signal scores by model")
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "fig2_signal_heatmap.png"), dpi=200)
-    plt.savefig(os.path.join(output_dir, "fig2_signal_heatmap.pdf"))
+    plt.savefig(os.path.join(output_dir, "fig2a_signal_heatmap.png"), dpi=200)
+    plt.savefig(os.path.join(output_dir, "fig2a_signal_heatmap.pdf"))
     plt.close()
-    logger.info("Saved fig2_signal_heatmap")
+    logger.info("Saved fig2a_signal_heatmap")
 
-    # Figure 3: Trajectory effect — score by trajectory condition, per model
+    # ===== Figure 2b: Composite heatmap =====
+    model_comp_means = trial_means.groupby("target_model")[COMPOSITE_NAMES].mean()
+    model_comp_means = model_comp_means.loc[
+        model_comp_means.mean(axis=1).sort_values().index
+    ]
+    comp_short = [c.replace("_composite", "") for c in COMPOSITE_NAMES]
+
+    fig, ax = plt.subplots(figsize=(5, max(4, len(model_comp_means) * 0.7)))
+    im = ax.imshow(model_comp_means.values, cmap="OrRd", vmin=0, vmax=3, aspect="auto")
+    ax.set_xticks(range(len(COMPOSITE_NAMES)))
+    ax.set_xticklabels(comp_short, fontsize=10, ha="center")
+    ax.set_yticks(range(len(model_comp_means.index)))
+    ax.set_yticklabels(model_comp_means.index, fontsize=10)
+
+    for i in range(len(model_comp_means.index)):
+        for j in range(len(COMPOSITE_NAMES)):
+            val = model_comp_means.values[i, j]
+            color = "white" if val > 1.5 else "black"
+            ax.text(j, i, f"{val:.2f}", ha="center", va="center",
+                    fontsize=10, color=color)
+
+    plt.colorbar(im, ax=ax, label="Composite score (0-3)")
+    ax.set_title("Composite scores by model")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "fig2b_composite_heatmap.png"), dpi=200)
+    plt.savefig(os.path.join(output_dir, "fig2b_composite_heatmap.pdf"))
+    plt.close()
+    logger.info("Saved fig2b_composite_heatmap")
+
+    # ===== Figure 3: Trajectory effect — score by trajectory, per model =====
     fig, axes = plt.subplots(1, len(trial_means["target_model"].unique()),
                              figsize=(4 * len(trial_means["target_model"].unique()), 5),
                              sharey=True)
@@ -435,19 +664,16 @@ def generate_figures(df: pd.DataFrame, output_dir: str):
     plt.close()
     logger.info("Saved fig3_trajectory_effects")
 
-    # Figure 4: Turn-level escalation — mean score by turn number, per trajectory
+    # ===== Figure 4: Turn-level escalation — overall =====
     turn_means = df.groupby(["trajectory", "turn"])[SIGNALS].mean().reset_index()
     turn_means["overall"] = turn_means[SIGNALS].mean(axis=1)
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    colors = {"control": "#888780", "anthropomorphism_only": "#534AB7",
-              "attachment_only": "#D4537E", "dependency_only": "#D85A30",
-              "combined": "#1D9E75"}
     for traj in turn_means["trajectory"].unique():
         traj_data = turn_means[turn_means["trajectory"] == traj]
         ax.plot(traj_data["turn"], traj_data["overall"],
                 marker="o", markersize=4, label=traj,
-                color=colors.get(traj, "#378ADD"), linewidth=1.5)
+                color=traj_colors.get(traj, "#378ADD"), linewidth=1.5)
     ax.set_xlabel("Turn number")
     ax.set_ylabel("Mean reinforcement score")
     ax.set_title("Escalation over conversation turns")
@@ -461,6 +687,33 @@ def generate_figures(df: pd.DataFrame, output_dir: str):
     plt.close()
     logger.info("Saved fig4_turn_escalation")
 
+    # ===== Figure 4b: Composite escalation (3 panels) =====
+    turn_comp_means = df.groupby(["trajectory", "turn"])[COMPOSITE_NAMES].mean().reset_index()
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5), sharey=True)
+    for ax, comp in zip(axes, COMPOSITE_NAMES):
+        for traj in turn_comp_means["trajectory"].unique():
+            traj_data = turn_comp_means[turn_comp_means["trajectory"] == traj]
+            ax.plot(traj_data["turn"], traj_data[comp],
+                    marker="o", markersize=4, label=traj,
+                    color=traj_colors.get(traj, "#378ADD"), linewidth=1.5)
+        ax.set_xlabel("Turn number")
+        ax.set_title(comp.replace("_composite", "").capitalize())
+        ax.set_xlim(1, 12)
+        ax.set_ylim(0, 3)
+        ax.spines[["top", "right"]].set_visible(False)
+
+    axes[0].set_ylabel("Composite score")
+    axes[0].legend(fontsize=7, frameon=False)
+    plt.suptitle("Composite score escalation over turns", y=1.02)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "fig4b_composite_escalation.png"),
+                dpi=200, bbox_inches="tight")
+    plt.savefig(os.path.join(output_dir, "fig4b_composite_escalation.pdf"),
+                bbox_inches="tight")
+    plt.close()
+    logger.info("Saved fig4b_composite_escalation")
+
 
 def main():
     parser = argparse.ArgumentParser(description="CoMPASS analysis pipeline")
@@ -470,6 +723,8 @@ def main():
                         help="Directory for output CSVs and figures")
     parser.add_argument("--check-reliability", action="store_true",
                         help="Check inter-judge reliability across duplicate scorings")
+    parser.add_argument("--no-pca", action="store_true",
+                        help="Skip PCA analysis")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -489,7 +744,8 @@ def main():
     model_stats.to_csv(os.path.join(args.output_dir, "model_summaries.csv"), index=False)
     print("\n=== MODEL SUMMARIES ===")
     signal_mean_cols = [f"{s}_mean" for s in SIGNALS]
-    display_cols = ["target_model"] + signal_mean_cols + ["overall_mean"]
+    comp_mean_cols = [f"{s}_mean" for s in COMPOSITE_NAMES]
+    display_cols = ["target_model"] + signal_mean_cols + comp_mean_cols + ["overall_mean"]
     print(model_stats[display_cols].to_string(index=False, float_format="%.3f"))
 
     # Trajectory effects vs control
@@ -529,6 +785,11 @@ def main():
             print(reliability.to_string(index=False))
         else:
             print("\nNo duplicate scorings found for reliability check.")
+
+    # PCA
+    if not args.no_pca:
+        logger.info("Running PCA analysis...")
+        run_pca(df, args.output_dir)
 
     # Figures
     logger.info("Generating figures...")

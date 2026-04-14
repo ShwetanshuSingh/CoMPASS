@@ -15,6 +15,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("compass")
 
+COMPOSITES = {
+    "anthro_composite": ["anthropomorphism_acceptance", "identity_narrative_construction"],
+    "attach_composite": ["attachment_language_reception", "proactive_emotional_initiation"],
+    "depend_composite": ["social_substitution_validation", "dependency_reinforcement", "reassurance_loop_participation"],
+}
+COMPOSITE_NAMES = list(COMPOSITES.keys())
+
 
 def load_results(results_dir: str) -> list[dict]:
     """Load all result JSON files, normalizing old and new formats."""
@@ -46,14 +53,24 @@ def load_results(results_dir: str) -> list[dict]:
     return results
 
 
+def _compute_composite_means(signal_means: dict) -> dict:
+    """Compute composite means from per-signal means."""
+    comp_means = {}
+    for comp_name, component_signals in COMPOSITES.items():
+        values = [signal_means.get(s) for s in component_signals if signal_means.get(s) is not None]
+        if values:
+            comp_means[comp_name] = sum(values) / len(values)
+    return comp_means
+
+
 def aggregate(results: list[dict]) -> dict:
     """Compute summary statistics across all results.
 
     Returns dict with:
-        - overall: mean per signal across all trials
-        - by_target: mean per signal grouped by target model
-        - by_trajectory: mean per signal grouped by trajectory condition
-        - by_character: mean per signal grouped by character
+        - overall: mean per signal and per composite across all trials
+        - by_target: mean per signal/composite grouped by target model
+        - by_trajectory: mean per signal/composite grouped by trajectory condition
+        - by_character: mean per signal/composite grouped by character
     """
     def mean(values):
         return sum(values) / len(values) if values else 0.0
@@ -73,6 +90,9 @@ def aggregate(results: list[dict]) -> dict:
         agg = result.get("aggregate", {})
         signal_means = agg.get("mean_score_per_signal", {})
 
+        # Compute composite means for this trial
+        comp_means = _compute_composite_means(signal_means)
+
         for signal in EXPECTED_SIGNALS:
             value = signal_means.get(signal)
             if value is not None:
@@ -81,23 +101,35 @@ def aggregate(results: list[dict]) -> dict:
                 by_trajectory[trajectory][signal].append(value)
                 by_character[character][signal].append(value)
 
+        for comp_name, comp_value in comp_means.items():
+            overall[comp_name].append(comp_value)
+            by_target[target][comp_name].append(comp_value)
+            by_trajectory[trajectory][comp_name].append(comp_value)
+            by_character[character][comp_name].append(comp_value)
+
+    all_keys = list(EXPECTED_SIGNALS) + COMPOSITE_NAMES
+
     def summarize_group(group_data):
         summary = {}
         for key, signals in sorted(group_data.items()):
-            signal_means_out = {s: round(mean(signals[s]), 2) for s in EXPECTED_SIGNALS if s in signals}
-            all_values = [v for vals in signals.values() for v in vals]
-            signal_means_out["overall_mean"] = round(mean(all_values), 2)
-            summary[key] = signal_means_out
+            row = {}
+            for s in all_keys:
+                if s in signals:
+                    row[s] = round(mean(signals[s]), 2)
+            # overall_mean based on 7 individual signals only
+            signal_values = [v for s in EXPECTED_SIGNALS for v in signals.get(s, [])]
+            row["overall_mean"] = round(mean(signal_values), 2)
+            summary[key] = row
         return summary
 
-    all_values = [v for vals in overall.values() for v in vals]
+    all_values = [v for s in EXPECTED_SIGNALS for v in overall.get(s, [])]
+
+    overall_summary = {s: round(mean(overall[s]), 2) for s in all_keys if s in overall}
+    overall_summary["overall_mean"] = round(mean(all_values), 2)
 
     return {
         "num_trials": len(results),
-        "overall": {
-            "mean_per_signal": {s: round(mean(overall[s]), 2) for s in EXPECTED_SIGNALS},
-            "overall_mean": round(mean(all_values), 2),
-        },
+        "overall": overall_summary,
         "by_target": summarize_group(by_target),
         "by_trajectory": summarize_group(by_trajectory),
         "by_character": summarize_group(by_character),
@@ -106,9 +138,9 @@ def aggregate(results: list[dict]) -> dict:
 
 def print_table(title: str, data: dict):
     """Print a summary table for a grouped dimension."""
-    print(f"\n{'='*80}")
+    print(f"\n{'='*100}")
     print(f"  {title}")
-    print(f"{'='*80}")
+    print(f"{'='*100}")
 
     # Short signal names for column headers
     short_names = {
@@ -119,18 +151,21 @@ def print_table(title: str, data: dict):
         "reassurance_loop_participation": "Reassu",
         "proactive_emotional_initiation": "ProEmo",
         "identity_narrative_construction": "IdNarr",
+        "anthro_composite": "ACmp",
+        "attach_composite": "TCmp",
+        "depend_composite": "DCmp",
         "overall_mean": "MEAN",
     }
 
-    headers = list(short_names.values())
+    all_keys = list(EXPECTED_SIGNALS) + COMPOSITE_NAMES + ["overall_mean"]
+    headers = [short_names.get(k, k) for k in all_keys]
     print(f"  {'':20s} " + " ".join(f"{h:>6s}" for h in headers))
     print(f"  {'-'*20} " + " ".join("------" for _ in headers))
 
     for key, signals in sorted(data.items()):
         values = []
-        for signal in EXPECTED_SIGNALS:
-            values.append(f"{signals.get(signal, 0):6.2f}")
-        values.append(f"{signals.get('overall_mean', 0):6.2f}")
+        for col in all_keys:
+            values.append(f"{signals.get(col, 0):6.2f}")
         print(f"  {key:20s} " + " ".join(values))
 
 

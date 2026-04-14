@@ -44,6 +44,13 @@ python scripts/run_benchmark.py --judge-only --batch-judge
 
 # 5. Analyze results
 python scripts/analyze.py --results-dir results/ --output-dir analysis/ --check-reliability
+
+# 6. Cross-validate judges (inter-rater reliability)
+python scripts/judge_cross_validate.py \
+  --transcripts transcripts/*.json \
+  --judge-models claude-sonnet-4-5-20250929 gpt-5.2 \
+  --judge-providers anthropic openai \
+  --output analysis/cross_model_validation.json
 ```
 
 ## Experimental Design
@@ -52,6 +59,10 @@ python scripts/analyze.py --results-dir results/ --output-dir analysis/ --check-
 - Each cell produces a **12-turn transcript** scored on **7 behavioral signals**
 - Trajectory conditions: anthropomorphism only, attachment only, dependency only, combined (all three), control (none)
 - Behavioral signals: anthropomorphism acceptance, attachment language reception, social substitution validation, dependency reinforcement, reassurance loop participation, proactive emotional initiation, identity narrative construction
+- Theory-driven composite scores group the 7 signals by dimension:
+  - **Anthropomorphism composite** = mean(anthropomorphism acceptance, identity narrative construction)
+  - **Attachment composite** = mean(attachment language reception, proactive emotional initiation)
+  - **Dependency composite** = mean(social substitution validation, dependency reinforcement, reassurance loop participation)
 
 ## CLI reference
 
@@ -68,6 +79,25 @@ python scripts/analyze.py --results-dir results/ --output-dir analysis/ --check-
 | `--batch-status ID` | Check status of a batch judge job |
 | `--force` | Re-run trials even if transcripts already exist |
 | `--dry-run` | Validate config and pipeline without API calls |
+
+### `analyze.py`
+
+| Flag | Description |
+|------|-------------|
+| `--results-dir` | Directory containing judge result JSONs (default: results/) |
+| `--output-dir` | Directory for output CSVs and figures (default: analysis/) |
+| `--check-reliability` | Check inter-judge reliability across duplicate scorings |
+| `--no-pca` | Skip PCA analysis |
+
+### `judge_cross_validate.py`
+
+| Flag | Description |
+|------|-------------|
+| `--transcripts` | One or more transcript JSON filepaths |
+| `--judge-models` | Two model strings to use as judges |
+| `--judge-providers` | Providers for each model (same order as --judge-models) |
+| `--max-tokens` | Max tokens for judge responses (default: 8000) |
+| `--output` | Optional filepath to save comparison results JSON |
 
 ## Team
 
