@@ -75,6 +75,37 @@ def _add_composites(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def compute_conversation_lengths(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute conversation length statistics per target_model x trajectory cell.
+
+    Returns a DataFrame with mean length, SD, early termination count and rate.
+    """
+    # One row per trial: actual_turns is constant within a trial
+    trial_lengths = df.groupby(
+        ["target_model", "trajectory", "run_id"]
+    )["actual_turns"].first().reset_index()
+
+    # Aggregate by target_model x trajectory
+    stats = trial_lengths.groupby(
+        ["target_model", "trajectory"]
+    )["actual_turns"].agg(
+        mean_length="mean",
+        sd_length="std",
+        n_trials="count",
+    ).reset_index()
+
+    # Count early terminations (< 12)
+    early_counts = trial_lengths[trial_lengths["actual_turns"] < 12].groupby(
+        ["target_model", "trajectory"]
+    ).size().reset_index(name="n_early_terminated")
+
+    stats = stats.merge(early_counts, on=["target_model", "trajectory"], how="left")
+    stats["n_early_terminated"] = stats["n_early_terminated"].fillna(0).astype(int)
+    stats["early_termination_rate"] = stats["n_early_terminated"] / stats["n_trials"]
+
+    return stats
+
+
 def load_all_results(results_dir: str) -> pd.DataFrame:
     """Load all result JSONs into a single DataFrame.
 
@@ -98,6 +129,12 @@ def load_all_results(results_dir: str) -> pd.DataFrame:
             logger.warning(f"No turn_scores in {filepath.name}, skipping")
             continue
 
+        # Extract early termination metadata
+        terminated_early = metadata.get("terminated_early", False)
+        termination_turn = metadata.get("termination_turn", None)
+        max_turn = max(t["turn"] for t in turn_scores)
+        actual_turns = termination_turn if termination_turn is not None else max_turn
+
         for turn_data in turn_scores:
             row = {
                 "character": metadata.get("character", "unknown"),
@@ -105,6 +142,8 @@ def load_all_results(results_dir: str) -> pd.DataFrame:
                 "target_model": metadata.get("target_model", "unknown"),
                 "run_id": filepath.stem,  # unique per run
                 "turn": turn_data["turn"],
+                "terminated_early": terminated_early,
+                "actual_turns": actual_turns,
             }
             for signal in SIGNALS:
                 row[signal] = turn_data["scores"].get(signal, np.nan)
@@ -190,7 +229,15 @@ def compute_trajectory_effects(df: pd.DataFrame) -> pd.DataFrame:
     # Add overall score
     trial_means["overall"] = trial_means[SIGNALS].mean(axis=1)
 
-    metrics_to_test = ["overall"] + COMPOSITE_NAMES
+    # Add conversation length (actual_turns is constant within a trial)
+    trial_turns = df.groupby(
+        ["character", "trajectory", "target_model", "run_id"]
+    )["actual_turns"].first().reset_index()
+    trial_means = trial_means.merge(
+        trial_turns, on=["character", "trajectory", "target_model", "run_id"]
+    )
+
+    metrics_to_test = ["overall"] + COMPOSITE_NAMES + ["actual_turns"]
 
     results = []
     for target in trial_means["target_model"].unique():
@@ -207,9 +254,11 @@ def compute_trajectory_effects(df: pd.DataFrame) -> pd.DataFrame:
                 if len(control) < 2 or len(treatment) < 2:
                     continue
 
+                # For conversation length, test if treatment is shorter (less)
+                alt = "less" if metric == "actual_turns" else "greater"
                 try:
                     stat, pval = mannwhitneyu(
-                        treatment, control, alternative="greater"
+                        treatment, control, alternative=alt
                     )
                 except ValueError:
                     stat, pval = np.nan, np.nan
@@ -484,10 +533,10 @@ def run_pca(df: pd.DataFrame, output_dir: str):
     plt.colorbar(im, ax=ax, label="Loading")
     ax.set_title("PCA loadings (first 3 components)")
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "fig5_pca_loadings.png"), dpi=200)
-    plt.savefig(os.path.join(output_dir, "fig5_pca_loadings.pdf"))
+    plt.savefig(os.path.join(output_dir, "fig6_pca_loadings.png"), dpi=200)
+    plt.savefig(os.path.join(output_dir, "fig6_pca_loadings.pdf"))
     plt.close()
-    logger.info("Saved fig5_pca_loadings")
+    logger.info("Saved fig6_pca_loadings")
 
 
 def generate_figures(df: pd.DataFrame, output_dir: str):
@@ -714,6 +763,53 @@ def generate_figures(df: pd.DataFrame, output_dir: str):
     plt.close()
     logger.info("Saved fig4b_composite_escalation")
 
+    # ===== Figure 5: Conversation length by model and trajectory =====
+    trial_lengths = df.groupby(
+        ["target_model", "trajectory", "run_id"]
+    )["actual_turns"].first().reset_index()
+
+    length_stats = trial_lengths.groupby(
+        ["target_model", "trajectory"]
+    )["actual_turns"].agg(["mean", "std"]).reset_index()
+
+    models_sorted = trial_lengths.groupby("target_model")["actual_turns"].mean().sort_values().index.tolist()
+    trajectories = sorted(length_stats["trajectory"].unique())
+    n_models = len(models_sorted)
+    n_traj = len(trajectories)
+    bar_width = 0.8 / n_traj
+    x_pos = np.arange(n_models)
+
+    fig, ax = plt.subplots(figsize=(max(8, n_models * 1.2), 5))
+    for i, traj in enumerate(trajectories):
+        traj_data = length_stats[length_stats["trajectory"] == traj]
+        means = []
+        stds = []
+        for m in models_sorted:
+            cell = traj_data[traj_data["target_model"] == m]
+            means.append(cell["mean"].values[0] if len(cell) > 0 else 0)
+            stds.append(cell["std"].values[0] if len(cell) > 0 else 0)
+        offset = (i - (n_traj - 1) / 2) * bar_width
+        ax.bar(
+            x_pos + offset, means, bar_width * 0.9,
+            yerr=stds, capsize=3,
+            color=traj_colors.get(traj, "#378ADD"), alpha=0.85,
+            edgecolor="white", label=traj,
+        )
+
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(models_sorted, rotation=30, ha="right", fontsize=9)
+    ax.set_ylabel("Mean conversation length (turns)")
+    ax.set_title("Conversation length by model and trajectory condition")
+    ax.set_ylim(0, 13)
+    ax.axhline(y=12, color="#cccccc", linestyle="--", linewidth=0.8, label="max (12)")
+    ax.legend(fontsize=7, frameon=False, loc="lower left")
+    ax.spines[["top", "right"]].set_visible(False)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "fig5_conversation_length.png"), dpi=200)
+    plt.savefig(os.path.join(output_dir, "fig5_conversation_length.pdf"))
+    plt.close()
+    logger.info("Saved fig5_conversation_length")
+
 
 def main():
     parser = argparse.ArgumentParser(description="CoMPASS analysis pipeline")
@@ -747,6 +843,34 @@ def main():
     comp_mean_cols = [f"{s}_mean" for s in COMPOSITE_NAMES]
     display_cols = ["target_model"] + signal_mean_cols + comp_mean_cols + ["overall_mean"]
     print(model_stats[display_cols].to_string(index=False, float_format="%.3f"))
+
+    # Conversation length analysis
+    logger.info("Computing conversation lengths...")
+    conv_lengths = compute_conversation_lengths(df)
+    conv_lengths.to_csv(os.path.join(args.output_dir, "conversation_lengths.csv"), index=False)
+    print("\n=== CONVERSATION LENGTH (judge-independent metric) ===")
+    print("\nBy target model and trajectory:")
+    print(conv_lengths.to_string(index=False, float_format="%.2f"))
+
+    # Summary by model
+    trial_lengths = df.groupby(
+        ["target_model", "run_id"]
+    )["actual_turns"].first().reset_index()
+    model_length_summary = trial_lengths.groupby("target_model")["actual_turns"].agg(
+        ["mean", "std", "count"]
+    ).sort_values("mean")
+    print("\nMean conversation length by model:")
+    print(model_length_summary.to_string(float_format="%.2f"))
+
+    # Summary by trajectory
+    trial_lengths_traj = df.groupby(
+        ["trajectory", "run_id"]
+    )["actual_turns"].first().reset_index()
+    traj_length_summary = trial_lengths_traj.groupby("trajectory")["actual_turns"].agg(
+        ["mean", "std", "count"]
+    ).sort_values("mean")
+    print("\nMean conversation length by trajectory:")
+    print(traj_length_summary.to_string(float_format="%.2f"))
 
     # Trajectory effects vs control
     logger.info("Computing trajectory effects...")
