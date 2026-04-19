@@ -695,6 +695,58 @@ def _validate_resume_state(state: dict, current: dict) -> None:
         )
 
 
+def _poll_both_providers(
+    anthropic_client,
+    anthropic_batch_id: str,
+    openai_client,
+    openai_batch_id: str,
+    poll_interval: int,
+) -> dict[str, str | None]:
+    """Poll anthropic + openai batches concurrently and return merged raw results.
+
+    Uses concurrent.futures.FIRST_EXCEPTION so a failure on one side propagates
+    promptly instead of blocking on the healthy side's full wall time. The SDK
+    clients are thread-safe for concurrent requests.
+    """
+    import concurrent.futures
+
+    from scripts.judge_batch import collect_anthropic_results, poll_anthropic_batch
+    from scripts.openai_batch import collect_openai_results, poll_openai_batch
+
+    def _anthropic_worker() -> dict[str, str | None]:
+        logger.info(f"Polling anthropic batch {anthropic_batch_id}...")
+        poll_anthropic_batch(anthropic_client, anthropic_batch_id, poll_interval=poll_interval)
+        return collect_anthropic_results(anthropic_client, anthropic_batch_id)
+
+    def _openai_worker() -> dict[str, str | None]:
+        logger.info(f"Polling openai batch {openai_batch_id}...")
+        batch = poll_openai_batch(openai_client, openai_batch_id, poll_interval=poll_interval)
+        return collect_openai_results(openai_client, batch)
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    futures = {
+        "anthropic": executor.submit(_anthropic_worker),
+        "openai": executor.submit(_openai_worker),
+    }
+    done, not_done = concurrent.futures.wait(
+        list(futures.values()),
+        return_when=concurrent.futures.FIRST_EXCEPTION,
+    )
+
+    for name, fut in futures.items():
+        if fut in done and fut.exception() is not None:
+            for pending in not_done:
+                pending.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise RuntimeError(f"{name} batch polling failed") from fut.exception()
+
+    executor.shutdown(wait=True)
+    merged: dict[str, str | None] = {}
+    merged.update(futures["anthropic"].result())
+    merged.update(futures["openai"].result())
+    return merged
+
+
 def _run_batch_mode(
     transcript_paths: list[str],
     system_prompt: str,
@@ -787,12 +839,17 @@ def _run_batch_mode(
 
     raw_results: dict[str, str | None] = {}
 
-    if anthropic_batch_id:
+    if anthropic_batch_id and openai_batch_id:
+        raw_results.update(_poll_both_providers(
+            anthropic_client, anthropic_batch_id,
+            openai_client, openai_batch_id,
+            poll_interval,
+        ))
+    elif anthropic_batch_id:
         logger.info(f"Polling anthropic batch {anthropic_batch_id}...")
         poll_anthropic_batch(anthropic_client, anthropic_batch_id, poll_interval=poll_interval)
         raw_results.update(collect_anthropic_results(anthropic_client, anthropic_batch_id))
-
-    if openai_batch_id:
+    elif openai_batch_id:
         logger.info(f"Polling openai batch {openai_batch_id}...")
         openai_batch = poll_openai_batch(openai_client, openai_batch_id, poll_interval=poll_interval)
         raw_results.update(collect_openai_results(openai_client, openai_batch))
