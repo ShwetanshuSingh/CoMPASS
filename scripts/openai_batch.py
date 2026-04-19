@@ -5,9 +5,19 @@ import logging
 import time
 from pathlib import Path
 
+import openai
+
 logger = logging.getLogger("compass")
 
 TERMINAL_STATUSES = {"completed", "failed", "expired", "cancelled"}
+
+# Exceptions that indicate a transient failure worth retrying during polling.
+TRANSIENT_RETRIEVE_ERRORS = (
+    openai.APIConnectionError,
+    openai.APITimeoutError,
+    openai.InternalServerError,
+    openai.RateLimitError,
+)
 
 
 def build_openai_batch_jsonl(requests: list[dict], path: Path) -> Path:
@@ -30,23 +40,49 @@ def build_openai_batch_jsonl(requests: list[dict], path: Path) -> Path:
     return path
 
 
-def submit_openai_batch(client, jsonl_path: Path) -> str:
-    """Upload the JSONL file and create a batch job. Returns the batch ID."""
+def submit_openai_batch(
+    client, jsonl_path: Path, metadata: dict | None = None
+) -> str:
+    """Upload the JSONL file and create a batch job. Returns the batch ID.
+
+    `metadata` is forwarded to OpenAI; values must be strings (max 512 chars each,
+    max 16 keys). Useful for identifying the batch in the OpenAI dashboard.
+    """
     with open(jsonl_path, "rb") as f:
         file_obj = client.files.create(file=f, purpose="batch")
-    batch = client.batches.create(
-        input_file_id=file_obj.id,
-        endpoint="/v1/chat/completions",
-        completion_window="24h",
-    )
+    kwargs = {
+        "input_file_id": file_obj.id,
+        "endpoint": "/v1/chat/completions",
+        "completion_window": "24h",
+    }
+    if metadata:
+        kwargs["metadata"] = metadata
+    batch = client.batches.create(**kwargs)
     logger.info(f"OpenAI batch submitted: {batch.id} (input_file={file_obj.id})")
     return batch.id
+
+
+def _retrieve_with_retry(client, batch_id: str, max_attempts: int = 3):
+    """Retrieve a batch with exponential backoff on transient network/5xx errors."""
+    for attempt in range(max_attempts):
+        try:
+            return client.batches.retrieve(batch_id)
+        except TRANSIENT_RETRIEVE_ERRORS as e:
+            if attempt == max_attempts - 1:
+                raise
+            sleep_for = 2**attempt
+            logger.warning(
+                f"Retrieve failed for OpenAI batch {batch_id} "
+                f"(attempt {attempt + 1}/{max_attempts}): {type(e).__name__}: {e}. "
+                f"Retrying in {sleep_for}s..."
+            )
+            time.sleep(sleep_for)
 
 
 def poll_openai_batch(client, batch_id: str, poll_interval: int = 30):
     """Poll until the batch reaches a terminal status. Returns the Batch object."""
     while True:
-        batch = client.batches.retrieve(batch_id)
+        batch = _retrieve_with_retry(client, batch_id)
         counts = batch.request_counts
         logger.info(
             f"OpenAI batch {batch_id}: status={batch.status}, "

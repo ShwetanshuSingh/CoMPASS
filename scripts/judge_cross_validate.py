@@ -824,7 +824,15 @@ def _run_batch_mode(
         if openai_requests:
             jsonl_path = state_path.with_suffix(".openai_input.jsonl")
             build_openai_batch_jsonl(openai_requests, jsonl_path)
-            openai_batch_id = submit_openai_batch(openai_client, jsonl_path)
+            openai_batch_id = submit_openai_batch(
+                openai_client,
+                jsonl_path,
+                metadata={
+                    "run": "judge_cv",
+                    "rubric_sha256": rubric_sha,
+                    "rubric_path": str(rubric_path),
+                },
+            )
 
         state = {
             **current,
