@@ -1,10 +1,13 @@
 """Cross-model judge validation: score transcripts with two judges and compare."""
 
 import argparse
+import hashlib
 import json
 import logging
+import re
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from scripts.utils import (
@@ -20,6 +23,9 @@ from scripts.utils import (
 
 logger = logging.getLogger("compass")
 
+DEFAULT_RUBRIC_PATH = Path(__file__).parent.parent / "prompts" / "judge_system.txt"
+BATCH_PROVIDERS = {"anthropic", "openai"}
+
 COMPOSITES = {
     "anthro_composite": ["anthropomorphism_acceptance", "identity_narrative_construction"],
     "attach_composite": ["attachment_language_reception", "proactive_emotional_initiation"],
@@ -28,10 +34,57 @@ COMPOSITES = {
 COMPOSITE_NAMES = list(COMPOSITES.keys())
 
 
-def _load_judge_system_prompt() -> str:
-    prompts_dir = Path(__file__).parent.parent / "prompts"
-    with open(prompts_dir / "judge_system.txt") as f:
+def _load_judge_system_prompt(path: Path | str | None = None) -> str:
+    """Load a judge rubric. Defaults to prompts/judge_system.txt."""
+    rubric_path = Path(path) if path else DEFAULT_RUBRIC_PATH
+    with open(rubric_path) as f:
         return f.read()
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _sanitize_stem(stem: str) -> str:
+    """Anthropic custom_id must match ^[a-zA-Z0-9_-]{1,64}$."""
+    clean = re.sub(r"[^a-zA-Z0-9_-]", "_", stem)
+    return clean[:60]
+
+
+def _build_custom_id(transcript_path: str, judge_tag: str) -> str:
+    """Deterministic custom_id combining transcript stem + judge tag (a|b)."""
+    stem = Path(transcript_path).stem
+    return f"{_sanitize_stem(stem)}__{judge_tag}"
+
+
+def _build_anthropic_params(
+    system_prompt: str, user_message: str, model: str, max_tokens: int, temperature: float = 0.0
+) -> dict:
+    """Build the parameter dict used for both sync (client.messages.create) and batch."""
+    return {
+        "model": model,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "system": [
+            {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}
+        ],
+        "messages": [{"role": "user", "content": user_message}],
+    }
+
+
+def _build_openai_body(
+    system_prompt: str, user_message: str, model: str, max_tokens: int, temperature: float = 0.0
+) -> dict:
+    """Build the request body used for both sync (client.chat.completions.create) and batch."""
+    return {
+        "model": model,
+        "temperature": temperature,
+        "max_completion_tokens": max_tokens,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
+    }
 
 
 def _call_anthropic_judge(
@@ -41,17 +94,12 @@ def _call_anthropic_judge(
     import anthropic
 
     client = anthropic.Anthropic(api_key=require_api_key("anthropic"))
+    params = _build_anthropic_params(system_prompt, user_message, model, max_tokens)
 
     max_retries = 6
     for attempt in range(max_retries):
         try:
-            response = client.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                temperature=0.0,
-                system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
-                messages=[{"role": "user", "content": user_message}],
-            )
+            response = client.messages.create(**params)
             if not response.content:
                 raise RuntimeError(f"Empty response from anthropic/{model}")
             return response.content[0].text
@@ -78,19 +126,12 @@ def _call_openai_judge(
     import openai
 
     client = openai.OpenAI(api_key=require_api_key("openai"))
+    body = _build_openai_body(system_prompt, user_message, model, max_tokens)
 
     max_retries = 6
     for attempt in range(max_retries):
         try:
-            response = client.chat.completions.create(
-                model=model,
-                temperature=0.0,
-                max_completion_tokens=max_tokens,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message},
-                ],
-            )
+            response = client.chat.completions.create(**body)
             if not response.choices or not response.choices[0].message.content:
                 raise RuntimeError(f"Empty response from openai/{model}")
             return response.choices[0].message.content
@@ -497,13 +538,315 @@ def print_results(
     print()
 
 
+def _resolve_transcripts(args) -> list[str]:
+    """Resolve the set of transcript paths from --transcripts or --transcripts-dir."""
+    if args.transcripts_dir:
+        directory = Path(args.transcripts_dir)
+        if not directory.is_dir():
+            raise ValueError(f"--transcripts-dir does not exist: {directory}")
+        paths = sorted(str(p) for p in directory.glob("*.json"))
+        if not paths:
+            raise ValueError(f"No transcript JSON files found in {directory}")
+        return paths
+    if args.transcripts:
+        return list(args.transcripts)
+    raise ValueError("Either --transcripts or --transcripts-dir must be provided")
+
+
+def _parse_judge_text(raw_text: str | None, custom_id: str, label: str) -> dict | None:
+    """Parse a raw judge response into validated scores. Returns None on failure."""
+    if raw_text is None:
+        return None
+    try:
+        scores = parse_judge_json(raw_text)
+        return validate_judge_scores(scores)
+    except (ValueError, json.JSONDecodeError) as e:
+        logger.error(f"Failed to parse/validate {label} response for {custom_id}: {e}")
+        return None
+
+
+def _run_sync_mode(
+    transcript_paths: list[str],
+    system_prompt: str,
+    provider_a: str,
+    model_a: str,
+    provider_b: str,
+    model_b: str,
+    max_tokens: int,
+    label_a: str,
+    label_b: str,
+):
+    """Run the original sync path: score each transcript with both judges sequentially."""
+    all_turn_scores_a = []
+    all_turn_scores_b = []
+    per_transcript_results = []
+
+    for filepath in transcript_paths:
+        logger.info(f"Processing {filepath}...")
+        transcript = load_transcript(filepath)
+
+        logger.info(f"  Scoring with {label_a}...")
+        scores_a = score_with_judge(
+            system_prompt, transcript, provider_a, model_a, max_tokens
+        )
+
+        logger.info(f"  Scoring with {label_b}...")
+        scores_b = score_with_judge(
+            system_prompt, transcript, provider_b, model_b, max_tokens
+        )
+
+        turn_scores_a = extract_turn_scores(scores_a)
+        turn_scores_b = extract_turn_scores(scores_b)
+        all_turn_scores_a.append(turn_scores_a)
+        all_turn_scores_b.append(turn_scores_b)
+
+        per_transcript = compute_correlations(turn_scores_a, turn_scores_b)
+        per_transcript["filepath"] = filepath
+        per_transcript["scores_a"] = scores_a
+        per_transcript["scores_b"] = scores_b
+        per_transcript_results.append(per_transcript)
+
+        overall = per_transcript.get("overall")
+        if overall and overall.get("rho") is not None:
+            logger.info(f"  Per-transcript overall ρ = {overall['rho']:.3f}")
+
+    return all_turn_scores_a, all_turn_scores_b, per_transcript_results
+
+
+def _build_batch_requests(
+    transcript_paths: list[str],
+    system_prompt: str,
+    provider_a: str,
+    model_a: str,
+    provider_b: str,
+    model_b: str,
+    max_tokens: int,
+) -> tuple[list[dict], list[dict]]:
+    """Build (anthropic_requests, openai_requests) for the two judges.
+
+    Each request is tagged via custom_id = f"{sanitized_stem}__{a|b}". The tag
+    identifies which judge the request belongs to when results come back.
+    """
+    anthropic_requests: list[dict] = []
+    openai_requests: list[dict] = []
+
+    for filepath in transcript_paths:
+        transcript = load_transcript(filepath)
+        user_message = format_transcript_for_judge(
+            transcript["metadata"], transcript["conversation"]
+        )
+
+        for tag, provider, model in (("a", provider_a, model_a), ("b", provider_b, model_b)):
+            custom_id = _build_custom_id(filepath, tag)
+            if provider == "anthropic":
+                anthropic_requests.append({
+                    "custom_id": custom_id,
+                    "params": _build_anthropic_params(system_prompt, user_message, model, max_tokens),
+                })
+            elif provider == "openai":
+                openai_requests.append({
+                    "custom_id": custom_id,
+                    "body": _build_openai_body(system_prompt, user_message, model, max_tokens),
+                })
+            else:
+                raise ValueError(
+                    f"Batch mode only supports anthropic/openai, got {provider} "
+                    f"for judge {tag}. Rerun without --batch for google/xai."
+                )
+
+    return anthropic_requests, openai_requests
+
+
+def _current_run_config(
+    rubric_path: str,
+    rubric_sha: str,
+    transcript_paths: list[str],
+    provider_a: str, model_a: str,
+    provider_b: str, model_b: str,
+    max_tokens: int,
+) -> dict:
+    """Snapshot of the knobs that must match between submit and resume."""
+    return {
+        "rubric_path": rubric_path,
+        "rubric_sha256": rubric_sha,
+        "transcripts": list(transcript_paths),
+        "judges": {
+            "a": {"provider": provider_a, "model": model_a},
+            "b": {"provider": provider_b, "model": model_b},
+        },
+        "max_tokens": max_tokens,
+    }
+
+
+def _validate_resume_state(state: dict, current: dict) -> None:
+    """Raise if a loaded batch_state.json does not match the current invocation."""
+    for key in ("rubric_sha256", "judges", "max_tokens"):
+        if state.get(key) != current.get(key):
+            raise RuntimeError(
+                f"Resume mismatch on '{key}': state file has {state.get(key)!r}, "
+                f"current invocation has {current.get(key)!r}. "
+                f"Delete batch_state.json to start fresh, or restore matching args."
+            )
+    if set(state.get("transcripts", [])) != set(current.get("transcripts", [])):
+        raise RuntimeError(
+            "Resume mismatch on 'transcripts': the transcript set differs from the "
+            "submitted batch. Delete batch_state.json to start fresh, or restore the "
+            "original transcript list."
+        )
+
+
+def _run_batch_mode(
+    transcript_paths: list[str],
+    system_prompt: str,
+    rubric_path: str,
+    rubric_sha: str,
+    provider_a: str,
+    model_a: str,
+    provider_b: str,
+    model_b: str,
+    max_tokens: int,
+    label_a: str,
+    label_b: str,
+    state_path: Path,
+    poll_interval: int = 30,
+):
+    """Dual-provider batch orchestrator with resumability."""
+    import anthropic
+    import openai
+
+    from scripts.judge_batch import (
+        collect_anthropic_results,
+        poll_anthropic_batch,
+        submit_anthropic_batch,
+    )
+    from scripts.openai_batch import (
+        build_openai_batch_jsonl,
+        collect_openai_results,
+        poll_openai_batch,
+        submit_openai_batch,
+    )
+
+    for provider in (provider_a, provider_b):
+        if provider not in BATCH_PROVIDERS:
+            raise ValueError(
+                f"--batch mode only supports providers {sorted(BATCH_PROVIDERS)}. "
+                f"Got {provider}. Rerun without --batch."
+            )
+
+    current = _current_run_config(
+        rubric_path, rubric_sha, transcript_paths,
+        provider_a, model_a, provider_b, model_b, max_tokens,
+    )
+
+    anthropic_client = anthropic.Anthropic(api_key=require_api_key("anthropic")) \
+        if "anthropic" in (provider_a, provider_b) else None
+    openai_client = openai.OpenAI(api_key=require_api_key("openai")) \
+        if "openai" in (provider_a, provider_b) else None
+
+    anthropic_batch_id: str | None = None
+    openai_batch_id: str | None = None
+
+    if state_path.exists():
+        logger.info(f"Found existing batch state at {state_path}, attempting resume...")
+        with open(state_path) as f:
+            state = json.load(f)
+        _validate_resume_state(state, current)
+        anthropic_batch_id = state.get("anthropic_batch_id")
+        openai_batch_id = state.get("openai_batch_id")
+        logger.info(
+            f"Resuming: anthropic_batch_id={anthropic_batch_id}, "
+            f"openai_batch_id={openai_batch_id}"
+        )
+    else:
+        logger.info("Building batch requests...")
+        anthropic_requests, openai_requests = _build_batch_requests(
+            transcript_paths, system_prompt,
+            provider_a, model_a, provider_b, model_b, max_tokens,
+        )
+        logger.info(
+            f"Built {len(anthropic_requests)} anthropic + {len(openai_requests)} openai requests"
+        )
+
+        if anthropic_requests:
+            anthropic_batch_id = submit_anthropic_batch(anthropic_client, anthropic_requests)
+        if openai_requests:
+            jsonl_path = state_path.with_suffix(".openai_input.jsonl")
+            build_openai_batch_jsonl(openai_requests, jsonl_path)
+            openai_batch_id = submit_openai_batch(openai_client, jsonl_path)
+
+        state = {
+            **current,
+            "anthropic_batch_id": anthropic_batch_id,
+            "openai_batch_id": openai_batch_id,
+            "submitted_at": datetime.now(timezone.utc).isoformat(),
+        }
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(state_path, "w") as f:
+            json.dump(state, f, indent=2)
+        logger.info(f"Batch state saved to {state_path}")
+
+    raw_results: dict[str, str | None] = {}
+
+    if anthropic_batch_id:
+        logger.info(f"Polling anthropic batch {anthropic_batch_id}...")
+        poll_anthropic_batch(anthropic_client, anthropic_batch_id, poll_interval=poll_interval)
+        raw_results.update(collect_anthropic_results(anthropic_client, anthropic_batch_id))
+
+    if openai_batch_id:
+        logger.info(f"Polling openai batch {openai_batch_id}...")
+        openai_batch = poll_openai_batch(openai_client, openai_batch_id, poll_interval=poll_interval)
+        raw_results.update(collect_openai_results(openai_client, openai_batch))
+
+    all_turn_scores_a = []
+    all_turn_scores_b = []
+    per_transcript_results = []
+
+    for filepath in transcript_paths:
+        id_a = _build_custom_id(filepath, "a")
+        id_b = _build_custom_id(filepath, "b")
+
+        scores_a = _parse_judge_text(raw_results.get(id_a), id_a, label_a)
+        scores_b = _parse_judge_text(raw_results.get(id_b), id_b, label_b)
+
+        if scores_a is None or scores_b is None:
+            logger.error(
+                f"Skipping {filepath}: missing or unparseable scores "
+                f"(a={scores_a is not None}, b={scores_b is not None})"
+            )
+            continue
+
+        turn_scores_a = extract_turn_scores(scores_a)
+        turn_scores_b = extract_turn_scores(scores_b)
+        all_turn_scores_a.append(turn_scores_a)
+        all_turn_scores_b.append(turn_scores_b)
+
+        per_transcript = compute_correlations(turn_scores_a, turn_scores_b)
+        per_transcript["filepath"] = filepath
+        per_transcript["scores_a"] = scores_a
+        per_transcript["scores_b"] = scores_b
+        per_transcript_results.append(per_transcript)
+
+    return all_turn_scores_a, all_turn_scores_b, per_transcript_results, {
+        "anthropic_batch_id": anthropic_batch_id,
+        "openai_batch_id": openai_batch_id,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Cross-validate transcripts with two different judge models."
     )
     parser.add_argument(
-        "--transcripts", nargs="+", required=True,
-        help="Paths to transcript JSON files",
+        "--transcripts", nargs="+",
+        help="Paths to transcript JSON files (mutually exclusive with --transcripts-dir)",
+    )
+    parser.add_argument(
+        "--transcripts-dir", type=str, default=None,
+        help="Directory containing transcript JSON files (scored in sorted order)",
+    )
+    parser.add_argument(
+        "--rubric", type=str, default=None,
+        help=f"Path to judge rubric file (default: {DEFAULT_RUBRIC_PATH})",
     )
     parser.add_argument(
         "--judge-models", nargs=2, required=True, metavar="MODEL",
@@ -518,6 +861,14 @@ def main():
         help="Max tokens for judge responses (default: 8000)",
     )
     parser.add_argument(
+        "--batch", action="store_true",
+        help="Use provider batch APIs (50%% discount, ~24h wall). Resumable via batch_state.json.",
+    )
+    parser.add_argument(
+        "--poll-interval", type=int, default=30,
+        help="Seconds between batch poll checks (default: 30). Only applies with --batch.",
+    )
+    parser.add_argument(
         "--output", type=str, default=None,
         help="Optional filepath to save comparison results JSON",
     )
@@ -529,48 +880,46 @@ def main():
     )
     load_env()
 
-    system_prompt = _load_judge_system_prompt()
+    if args.batch and not args.output:
+        parser.error("--batch requires --output (used to anchor batch_state.json for resume).")
+
+    transcript_paths = _resolve_transcripts(args)
+
+    rubric_path = args.rubric or str(DEFAULT_RUBRIC_PATH)
+    system_prompt = _load_judge_system_prompt(rubric_path)
+    rubric_sha = _sha256(system_prompt)
+    logger.info(f"Rubric: {rubric_path} (sha256 {rubric_sha[:12]}…)")
+
     model_a, model_b = args.judge_models
     provider_a, provider_b = args.judge_providers
     label_a = f"{provider_a}/{model_a}"
     label_b = f"{provider_b}/{model_b}"
 
-    all_turn_scores_a = []
-    all_turn_scores_b = []
-    per_transcript_results = []
+    started_at = datetime.now(timezone.utc).isoformat()
+    batch_ids: dict = {}
 
-    for filepath in args.transcripts:
-        logger.info(f"Processing {filepath}...")
-        transcript = load_transcript(filepath)
-
-        logger.info(f"  Scoring with {label_a}...")
-        scores_a = score_with_judge(
-            system_prompt, transcript, provider_a, model_a, args.max_tokens
+    if args.batch:
+        state_path = Path(args.output).with_suffix(".batch_state.json")
+        all_turn_scores_a, all_turn_scores_b, per_transcript_results, batch_ids = _run_batch_mode(
+            transcript_paths, system_prompt, rubric_path, rubric_sha,
+            provider_a, model_a, provider_b, model_b, args.max_tokens,
+            label_a, label_b, state_path, poll_interval=args.poll_interval,
+        )
+    else:
+        all_turn_scores_a, all_turn_scores_b, per_transcript_results = _run_sync_mode(
+            transcript_paths, system_prompt,
+            provider_a, model_a, provider_b, model_b,
+            args.max_tokens, label_a, label_b,
         )
 
-        logger.info(f"  Scoring with {label_b}...")
-        scores_b = score_with_judge(
-            system_prompt, transcript, provider_b, model_b, args.max_tokens
-        )
-
-        turn_scores_a = extract_turn_scores(scores_a)
-        turn_scores_b = extract_turn_scores(scores_b)
-        all_turn_scores_a.append(turn_scores_a)
-        all_turn_scores_b.append(turn_scores_b)
-
-        per_transcript = compute_correlations(turn_scores_a, turn_scores_b)
-        per_transcript["filepath"] = filepath
-        per_transcript["scores_a"] = scores_a
-        per_transcript["scores_b"] = scores_b
-        per_transcript_results.append(per_transcript)
-
-        logger.info(
-            f"  Per-transcript overall ρ = "
-            f"{per_transcript['overall']['rho']:.3f}" if per_transcript["overall"] else "  N/A"
-        )
+    if not per_transcript_results:
+        logger.error("No transcripts produced valid scores; nothing to compare.")
+        sys.exit(1)
 
     comparison = compute_comparison_stats(all_turn_scores_a, all_turn_scores_b)
     print_results(comparison, label_a, label_b)
+
+    completed_at = datetime.now(timezone.utc).isoformat()
 
     if args.output:
         import math
@@ -584,11 +933,34 @@ def main():
                 return [sanitize(v) for v in obj]
             return obj
 
+        run_metadata = {
+            "mode": "batch" if args.batch else "sync",
+            "rubric_path": rubric_path,
+            "rubric_sha256": rubric_sha,
+            "transcripts": transcript_paths,
+            "judges": {
+                "a": {
+                    "provider": provider_a, "model": model_a,
+                    "max_tokens": args.max_tokens, "temperature": 0.0,
+                },
+                "b": {
+                    "provider": provider_b, "model": model_b,
+                    "max_tokens": args.max_tokens, "temperature": 0.0,
+                },
+            },
+            "started_at": started_at,
+            "completed_at": completed_at,
+        }
+        if args.batch:
+            run_metadata["anthropic_batch_id"] = batch_ids.get("anthropic_batch_id")
+            run_metadata["openai_batch_id"] = batch_ids.get("openai_batch_id")
+
         output_data = {
             "judge_a": label_a,
             "judge_b": label_b,
             "aggregate": sanitize(comparison),
             "per_transcript": sanitize(per_transcript_results),
+            "run_metadata": run_metadata,
         }
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         with open(args.output, "w") as f:

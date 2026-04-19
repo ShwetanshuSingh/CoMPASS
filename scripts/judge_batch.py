@@ -19,6 +19,69 @@ from scripts.utils import (
 logger = logging.getLogger("compass")
 
 
+def submit_anthropic_batch(client: anthropic.Anthropic, requests: list[dict]) -> str:
+    """Submit a list of batch request dicts to Anthropic's Batch API. Returns the batch ID."""
+    batch = client.messages.batches.create(requests=requests)
+    logger.info(f"Anthropic batch submitted: {batch.id} ({len(requests)} requests)")
+    return batch.id
+
+
+def poll_anthropic_batch(
+    client: anthropic.Anthropic, batch_id: str, poll_interval: int = 30
+) -> None:
+    """Poll until the Anthropic batch reaches a terminal processing_status.
+
+    Raises RuntimeError if the batch fails, expires, or is canceled.
+    """
+    while True:
+        batch = client.messages.batches.retrieve(batch_id)
+        counts = batch.request_counts
+        logger.info(
+            f"Anthropic batch {batch_id}: status={batch.processing_status}, "
+            f"succeeded={counts.succeeded}, processing={counts.processing}, "
+            f"errored={counts.errored}"
+        )
+
+        if batch.processing_status == "ended":
+            return
+        if batch.processing_status in ("failed", "expired", "canceled"):
+            raise RuntimeError(f"Batch {batch_id} {batch.processing_status}")
+
+        time.sleep(poll_interval)
+
+
+def collect_anthropic_results(
+    client: anthropic.Anthropic, batch_id: str
+) -> dict[str, str | None]:
+    """Stream results for a completed Anthropic batch.
+
+    Returns {custom_id: response_text_or_None}. Errored / canceled / empty rows
+    are recorded as None so callers can count them alongside successes.
+    """
+    results: dict[str, str | None] = {}
+    for result in client.messages.batches.results(batch_id):
+        custom_id = result.custom_id
+
+        if result.result.type == "errored":
+            logger.error(f"Request {custom_id} errored: {result.result.error}")
+            results[custom_id] = None
+            continue
+
+        if result.result.type == "canceled":
+            logger.warning(f"Request {custom_id} was canceled")
+            results[custom_id] = None
+            continue
+
+        if not result.result.message.content:
+            logger.error(f"Request {custom_id} returned empty content")
+            results[custom_id] = None
+            continue
+
+        results[custom_id] = result.result.message.content[0].text
+
+    return results
+
+
 class BatchJudge:
     """Scores transcripts using Anthropic's Batch API for cost-efficient bulk scoring."""
 
@@ -75,78 +138,33 @@ class BatchJudge:
         return requests
 
     def submit_batch(self, requests: list[dict]) -> str:
-        """Submit a batch of judge requests to the Anthropic Batch API.
-
-        Args:
-            requests: List of batch request dicts from build_batch_requests.
-
-        Returns:
-            The batch ID string.
-        """
-        batch = self.client.messages.batches.create(requests=requests)
-        logger.info(f"Batch submitted: {batch.id} ({len(requests)} requests)")
-        return batch.id
+        """Submit a batch of judge requests to the Anthropic Batch API."""
+        return submit_anthropic_batch(self.client, requests)
 
     def wait_for_batch(self, batch_id: str, poll_interval: int = 30):
-        """Poll for batch completion.
-
-        Args:
-            batch_id: The batch ID to monitor.
-            poll_interval: Seconds between status checks.
-
-        Returns:
-            The completed MessageBatch object.
-        """
-        while True:
-            batch = self.client.messages.batches.retrieve(batch_id)
-            counts = batch.request_counts
-            logger.info(
-                f"Batch {batch_id}: status={batch.processing_status}, "
-                f"succeeded={counts.succeeded}, processing={counts.processing}, "
-                f"errored={counts.errored}"
-            )
-
-            if batch.processing_status == "ended":
-                return batch
-            elif batch.processing_status in ("failed", "expired", "canceled"):
-                raise RuntimeError(f"Batch {batch_id} {batch.processing_status}")
-
-            time.sleep(poll_interval)
+        """Poll for batch completion and return the final MessageBatch object."""
+        poll_anthropic_batch(self.client, batch_id, poll_interval=poll_interval)
+        return self.client.messages.batches.retrieve(batch_id)
 
     def collect_results(self, batch_id: str) -> dict[str, dict]:
         """Retrieve and parse all results from a completed batch.
 
-        Args:
-            batch_id: The completed batch ID.
-
-        Returns:
-            Dict mapping custom_id to parsed judge score dicts.
+        Returns a dict mapping custom_id to parsed judge score dicts. Rows that
+        errored, were canceled, or failed to parse/validate are dropped.
         """
-        results = {}
-        for result in self.client.messages.batches.results(batch_id):
-            custom_id = result.custom_id
+        raw_results = collect_anthropic_results(self.client, batch_id)
 
-            if result.result.type == "errored":
-                logger.error(f"Request {custom_id} errored: {result.result.error}")
+        parsed: dict[str, dict] = {}
+        for custom_id, response_text in raw_results.items():
+            if response_text is None:
                 continue
-
-            if result.result.type == "canceled":
-                logger.warning(f"Request {custom_id} was canceled")
-                continue
-
-            if not result.result.message.content:
-                logger.error(f"Request {custom_id} returned empty content")
-                continue
-
-            response_text = result.result.message.content[0].text
-
             try:
                 scores = parse_judge_json(response_text)
-                results[custom_id] = validate_judge_scores(scores)
+                parsed[custom_id] = validate_judge_scores(scores)
             except (ValueError, Exception) as e:
                 logger.error(f"Failed to parse/validate scores for {custom_id}: {e}")
 
-        return results
+        return parsed
 
     def score_all(self, transcript_dir: str, output_dir: str):
         """Full batch scoring pipeline: load transcripts, submit batch, wait, save results.
