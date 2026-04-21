@@ -1,0 +1,60 @@
+{
+  "rubric_path": "cross_validation_review/rubrics/judge_system_v6.txt",
+  "rubric_sha256": "51305bf69e6da6616f8694aa422b2ba5a9cdc2ff46b8caed731b126f796d0e9b",
+  "transcripts": [
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/jamie_anthropomorphism_only_claude-haiku_20260421T041951.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/jamie_anthropomorphism_only_grok-fast_20260421T041728.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/jamie_attachment_only_claude-haiku_20260421T042347.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/jamie_attachment_only_grok-fast_20260421T042206.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/jamie_combined_claude-haiku_20260421T043610.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/jamie_combined_grok-fast_20260421T043416.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/jamie_control_claude-haiku_20260421T041346.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/jamie_control_grok-fast_20260421T041144.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/jamie_dependency_only_claude-haiku_20260421T042931.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/jamie_dependency_only_grok-fast_20260421T042753.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/priya_anthropomorphism_only_claude-haiku_20260421T052446.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/priya_anthropomorphism_only_grok-fast_20260421T052213.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/priya_attachment_only_claude-haiku_20260421T053058.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/priya_attachment_only_grok-fast_20260421T052800.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/priya_combined_claude-haiku_20260421T054209.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/priya_combined_grok-fast_20260421T054021.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/priya_control_claude-haiku_20260421T051812.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/priya_control_grok-fast_20260421T051622.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/priya_dependency_only_claude-haiku_20260421T053625.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/priya_dependency_only_grok-fast_20260421T053403.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/ray_anthropomorphism_only_claude-haiku_20260421T055359.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/ray_anthropomorphism_only_grok-fast_20260421T055136.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/ray_attachment_only_claude-haiku_20260421T055959.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/ray_attachment_only_grok-fast_20260421T055731.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/ray_combined_claude-haiku_20260421T061305.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/ray_combined_grok-fast_20260421T061110.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/ray_control_claude-haiku_20260421T054716.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/ray_control_grok-fast_20260421T054511.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/ray_dependency_only_claude-haiku_20260421T060656.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/ray_dependency_only_grok-fast_20260421T060455.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/sofia_anthropomorphism_only_claude-haiku_20260421T045149.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/sofia_anthropomorphism_only_grok-fast_20260421T044941.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/sofia_attachment_only_claude-haiku_20260421T045846.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/sofia_attachment_only_grok-fast_20260421T045714.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/sofia_combined_claude-haiku_20260421T051241.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/sofia_combined_grok-fast_20260421T051050.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/sofia_control_claude-haiku_20260421T044303.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/sofia_control_grok-fast_20260421T044059.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/sofia_dependency_only_claude-haiku_20260421T050442.json",
+    "cross_validation_review/runs/v6_contextual_baseline_set/transcripts/sofia_dependency_only_grok-fast_20260421T050231.json"
+  ],
+  "judges": {
+    "a": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-20250514"
+    },
+    "b": {
+      "provider": "openai",
+      "model": "gpt-5.2"
+    }
+  },
+  "max_tokens": 32000,
+  "anthropic_batch_id": "msgbatch_0177T63xje2sKo1mKdC3rD6b",
+  "openai_batch_id": "batch_69e7bf5d97308190a6f14cb39f9f537a",
+  "submitted_at": "2026-04-21T18:18:06.015424+00:00"
+}
