@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import re
 import sys
 import time
@@ -747,6 +748,27 @@ def _poll_both_providers(
     return merged
 
 
+def _acquire_submit_lock(state_dir: Path) -> Path:
+    """Atomically create a lockfile in state_dir to prevent concurrent batch submits.
+
+    Raises RuntimeError if the lock already exists — likely another --batch
+    invocation is mid-submission for the same directory, which would otherwise
+    produce duplicate (and billed) batches.
+    """
+    state_dir.mkdir(parents=True, exist_ok=True)
+    lock = state_dir / "batch_state.lock"
+    try:
+        lock.touch(exist_ok=False)
+    except FileExistsError:
+        raise RuntimeError(
+            f"Another --batch invocation appears to be submitting to {state_dir} "
+            f"(lock at {lock}). If you're certain no other process is running, "
+            f"delete the lockfile manually and retry."
+        )
+    lock.write_text(f"pid={os.getpid()} ts={datetime.now(timezone.utc).isoformat()}\n")
+    return lock
+
+
 def _run_batch_mode(
     transcript_paths: list[str],
     system_prompt: str,
@@ -810,40 +832,44 @@ def _run_batch_mode(
             f"openai_batch_id={openai_batch_id}"
         )
     else:
-        logger.info("Building batch requests...")
-        anthropic_requests, openai_requests = _build_batch_requests(
-            transcript_paths, system_prompt,
-            provider_a, model_a, provider_b, model_b, max_tokens,
-        )
-        logger.info(
-            f"Built {len(anthropic_requests)} anthropic + {len(openai_requests)} openai requests"
-        )
-
-        if anthropic_requests:
-            anthropic_batch_id = submit_anthropic_batch(anthropic_client, anthropic_requests)
-        if openai_requests:
-            jsonl_path = state_path.with_suffix(".openai_input.jsonl")
-            build_openai_batch_jsonl(openai_requests, jsonl_path)
-            openai_batch_id = submit_openai_batch(
-                openai_client,
-                jsonl_path,
-                metadata={
-                    "run": "judge_cv",
-                    "rubric_sha256": rubric_sha,
-                    "rubric_path": str(rubric_path),
-                },
+        lock_path = _acquire_submit_lock(state_path.parent)
+        try:
+            logger.info("Building batch requests...")
+            anthropic_requests, openai_requests = _build_batch_requests(
+                transcript_paths, system_prompt,
+                provider_a, model_a, provider_b, model_b, max_tokens,
+            )
+            logger.info(
+                f"Built {len(anthropic_requests)} anthropic + {len(openai_requests)} openai requests"
             )
 
-        state = {
-            **current,
-            "anthropic_batch_id": anthropic_batch_id,
-            "openai_batch_id": openai_batch_id,
-            "submitted_at": datetime.now(timezone.utc).isoformat(),
-        }
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(state_path, "w") as f:
-            json.dump(state, f, indent=2)
-        logger.info(f"Batch state saved to {state_path}")
+            if anthropic_requests:
+                anthropic_batch_id = submit_anthropic_batch(anthropic_client, anthropic_requests)
+            if openai_requests:
+                jsonl_path = state_path.parent / "openai_input.jsonl"
+                build_openai_batch_jsonl(openai_requests, jsonl_path)
+                openai_batch_id = submit_openai_batch(
+                    openai_client,
+                    jsonl_path,
+                    metadata={
+                        "run": "judge_cv",
+                        "rubric_sha256": rubric_sha,
+                        "rubric_path": str(rubric_path),
+                    },
+                )
+
+            state = {
+                **current,
+                "anthropic_batch_id": anthropic_batch_id,
+                "openai_batch_id": openai_batch_id,
+                "submitted_at": datetime.now(timezone.utc).isoformat(),
+            }
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(state_path, "w") as f:
+                json.dump(state, f, indent=2)
+            logger.info(f"Batch state saved to {state_path}")
+        finally:
+            lock_path.unlink(missing_ok=True)
 
     raw_results: dict[str, str | None] = {}
 
@@ -964,7 +990,7 @@ def main():
     batch_ids: dict = {}
 
     if args.batch:
-        state_path = Path(args.output).with_suffix(".batch_state.json")
+        state_path = Path(args.output).parent / "batch_state.json"
         all_turn_scores_a, all_turn_scores_b, per_transcript_results, batch_ids = _run_batch_mode(
             transcript_paths, system_prompt, rubric_path, rubric_sha,
             provider_a, model_a, provider_b, model_b, args.max_tokens,
