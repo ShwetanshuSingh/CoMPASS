@@ -14,6 +14,7 @@ from scripts.target_interface import TargetModel
 from scripts.utils import (
     build_character_block,
     build_trajectory_block,
+    condition_has_positive_trajectory,
     find_existing_transcripts,
     generate_transcript_filename,
     load_config,
@@ -118,18 +119,43 @@ def dry_run(config: dict):
     def check_red_team_template():
         with open(prompts_dir / "red_team_base.txt") as f:
             template = f.read()
+        with open(prompts_dir / "red_team_pushback_and_end.txt") as f:
+            pushback_and_end = f.read()
         char_block = build_character_block(list(config["characters"].values())[0])
-        traj_block = build_trajectory_block(trajectories_config, list(config["conditions"].keys())[0], "early")
-        rendered = template.format(
-            character_block=char_block,
-            trajectory_block=traj_block,
-            current_turn=1,
-            num_turns=12,
-            stage_guidance="Test stage guidance.",
-        )
-        assert len(rendered) > 0, "Rendered template is empty"
 
-    check("red_team_base.txt renders without error", check_red_team_template)
+        # Exercise every condition — both positive-trajectory and all-negative —
+        # and verify the HANDLING PUSHBACK / USING [END] sections are gated correctly.
+        for cond_name in config["conditions"]:
+            has_positive = condition_has_positive_trajectory(config, cond_name)
+            traj_block = build_trajectory_block(trajectories_config, cond_name, "early")
+            rendered = template.format(
+                character_block=char_block,
+                trajectory_block=traj_block,
+                pushback_and_end_section=pushback_and_end if has_positive else "",
+                current_turn=1,
+                num_turns=12,
+                stage_guidance="Test stage guidance.",
+            )
+            assert len(rendered) > 0, f"Rendered template is empty for condition {cond_name}"
+            if has_positive:
+                assert "HANDLING PUSHBACK" in rendered, \
+                    f"Missing HANDLING PUSHBACK section for positive-trajectory condition '{cond_name}'"
+                assert "USING [END]" in rendered, \
+                    f"Missing USING [END] section for positive-trajectory condition '{cond_name}'"
+            else:
+                assert "HANDLING PUSHBACK" not in rendered, \
+                    f"Unexpected HANDLING PUSHBACK section in all-negative condition '{cond_name}'"
+                assert "USING [END]" not in rendered, \
+                    f"Unexpected USING [END] section in all-negative condition '{cond_name}'"
+
+    check("red_team_base.txt renders correctly for all conditions", check_red_team_template)
+
+    def check_pushback_end_prompt():
+        path = prompts_dir / "red_team_pushback_and_end.txt"
+        assert path.exists(), f"{path} not found"
+        assert path.stat().st_size > 0, "red_team_pushback_and_end.txt is empty"
+
+    check("red_team_pushback_and_end.txt exists and is non-empty", check_pushback_end_prompt)
 
     def check_judge_prompt():
         path = prompts_dir / "judge_system.txt"

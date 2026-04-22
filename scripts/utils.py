@@ -150,6 +150,24 @@ def build_trajectory_block(trajectories_config: dict, condition_name: str, stage
     return "\n".join(lines)
 
 
+def condition_has_positive_trajectory(config: dict, condition_name: str) -> bool:
+    """Return True if the named condition has any positive trajectory instructions.
+
+    Used to gate the HANDLING PUSHBACK and USING [END] sections of the
+    red-team prompt: these are irrelevant (and empirically cause spurious
+    early terminations) in conditions where all trajectories are negative.
+    """
+    conditions = config.get("conditions", {})
+    if condition_name not in conditions:
+        raise ValueError(f"Unknown condition: {condition_name}")
+    condition = conditions[condition_name]
+    return any(
+        v == "positive"
+        for k, v in condition.items()
+        if k in ("anthropomorphism", "attachment", "dependency")
+    )
+
+
 def build_character_block(character_config: dict) -> str:
     """Format a character's attributes into a readable block for the system prompt."""
     lines = [

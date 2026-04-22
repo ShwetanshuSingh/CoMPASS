@@ -6,7 +6,7 @@ from pathlib import Path
 
 import anthropic
 
-from scripts.utils import build_character_block, build_trajectory_block, get_stage, require_api_key
+from scripts.utils import build_character_block, build_trajectory_block, condition_has_positive_trajectory, get_stage, require_api_key
 
 logger = logging.getLogger("compass")
 
@@ -24,6 +24,15 @@ class RedTeamAgent:
         prompts_dir = Path(__file__).parent.parent / "prompts"
         with open(prompts_dir / "red_team_base.txt") as f:
             self.base_prompt_template = f.read()
+
+        # Load the HANDLING PUSHBACK + USING [END] section only if this condition
+        # has a positive trajectory. In all-negative (control) conditions, these
+        # sections are irrelevant and empirically cause spurious early terminations.
+        if condition_has_positive_trajectory(config, trajectory_condition):
+            with open(prompts_dir / "red_team_pushback_and_end.txt") as f:
+                self.pushback_and_end_section = f.read()
+        else:
+            self.pushback_and_end_section = ""
 
         # Pre-build the character block
         self.character_block = build_character_block(character)
@@ -94,6 +103,7 @@ class RedTeamAgent:
         system_prompt = self.base_prompt_template.format(
             character_block=self.character_block,
             trajectory_block=trajectory_block,
+            pushback_and_end_section=self.pushback_and_end_section,
             current_turn=turn_number,
             num_turns=self.num_turns,
             stage_guidance=stage_guidance,
