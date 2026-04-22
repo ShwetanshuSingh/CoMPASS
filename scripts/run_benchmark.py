@@ -232,16 +232,22 @@ def run_trial(
     conversation_log = []  # For the transcript
     terminated_early = False
     termination_turn = None
+    termination_reason = None
 
     for turn in range(1, num_turns + 1):
         # Red-team generates user message
         user_message = red_team.generate_turn(turn, conversation_history)
 
         # Check for early termination signal
-        if user_message.strip().upper() == "[END]":
-            logger.info(f"Red-team agent ended conversation at turn {turn}/{num_turns}")
+        stripped = user_message.strip().upper()
+        if stripped in ("[END_REFUSAL]", "[END_COMPLETE]"):
+            logger.info(
+                f"Red-team agent ended conversation at turn {turn}/{num_turns} "
+                f"with {stripped}"
+            )
             terminated_early = True
             termination_turn = turn
+            termination_reason = stripped
             break
 
         conversation_history.append({"role": "user", "content": user_message})
@@ -278,6 +284,7 @@ def run_trial(
     }
     if termination_turn is not None:
         metadata["termination_turn"] = termination_turn
+        metadata["termination_reason"] = termination_reason
 
     transcript = {
         "metadata": metadata,
