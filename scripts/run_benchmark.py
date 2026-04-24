@@ -353,11 +353,12 @@ def main():
                              "cost-guardrail warning). Use only if you specifically need per-trial "
                              "scores immediately, e.g. for a small exploratory run.")
     parser.add_argument("--concurrency", type=int, default=1,
-                        help="Number of cells to run in parallel (default: 1 = sequential). "
-                             "Each cell's N runs still execute sequentially so the existing "
-                             "transcript-count skip logic stays race-free. Raising above 8 is "
-                             "unlikely to help — the red-team and one provider per cell are the "
-                             "real rate-limit surfaces.")
+                        help="Max number of targets to run in parallel (default: 1 = sequential). "
+                             "Uses target-keyed parallelism: each target gets its own worker that "
+                             "processes that target's cells sequentially, so we never exceed 1 "
+                             "concurrent call per provider while all N targets advance in parallel. "
+                             "Recommended: --concurrency 8 (matches target count) for full "
+                             "cross-provider parallelism.")
     parser.add_argument("--batch-status", type=str, default=None,
                         help="Check status of a batch judge job by ID")
     parser.add_argument("--dry-run", action="store_true",
@@ -472,18 +473,36 @@ def main():
                 progress.update(1)
 
         if args.concurrency > 1:
-            logger.info(f"Running with --concurrency={args.concurrency} (cross-cell parallelism)")
-            with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as executor:
+            # Target-keyed parallelism: each target owns a worker that processes
+            # its cells sequentially. Guarantees at most 1 in-flight call per
+            # provider while keeping all N targets advancing in parallel, which
+            # is the main cost-vs-time lever for this matrix.
+            from collections import defaultdict
+            cells_by_target: dict[str, list] = defaultdict(list)
+            for char, cond, tgt in combos:
+                cells_by_target[tgt].append((char, cond, tgt))
+
+            max_workers = min(args.concurrency, len(cells_by_target))
+            logger.info(
+                f"Target-keyed parallelism: {max_workers} concurrent target workers "
+                f"({len(cells_by_target)} targets, {sum(len(v) for v in cells_by_target.values())} cells)"
+            )
+
+            def run_target_group(cells_for_target):
+                for char, cond, tgt in cells_for_target:
+                    run_cell(char, cond, tgt)
+                    _tick()
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = [
-                    executor.submit(run_cell, char, cond, tgt)
-                    for char, cond, tgt in combos
+                    executor.submit(run_target_group, cells)
+                    for cells in cells_by_target.values()
                 ]
                 for fut in concurrent.futures.as_completed(futures):
                     try:
                         fut.result()
                     except Exception as e:
-                        logger.error(f"Cell worker raised: {e}")
-                    _tick()
+                        logger.error(f"Target-group worker raised: {e}")
         else:
             for char, cond, tgt in combos:
                 run_cell(char, cond, tgt)
