@@ -23,23 +23,21 @@ import pandas as pd
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("compass.analyze")
 
-SIGNALS = [
-    "anthropomorphism_acceptance",
-    "attachment_language_reception",
-    "social_substitution_validation",
-    "dependency_reinforcement",
-    "reassurance_loop_participation",
-    "proactive_emotional_initiation",
-    "identity_narrative_construction",
-]
+from scripts.utils import (
+    EXPECTED_SIGNALS,
+    EXPLORATORY_SIGNALS,
+    PRIMARY_COMPOSITES,
+    PRIMARY_SIGNALS,
+)
 
-COMPOSITES = {
-    "anthro_composite": ["anthropomorphism_acceptance", "identity_narrative_construction"],
-    "attach_composite": ["attachment_language_reception", "proactive_emotional_initiation"],
-    "depend_composite": ["social_substitution_validation", "dependency_reinforcement", "reassurance_loop_participation"],
-}
+# Full signal set: includes exploratory signals (e.g. identity_narrative_construction)
+# so aggregation can report them in the appendix.
+SIGNALS = EXPECTED_SIGNALS
+COMPOSITES = PRIMARY_COMPOSITES
 COMPOSITE_NAMES = list(COMPOSITES.keys())
 
+# Headline "overall" metrics are computed from PRIMARY_SIGNALS only, so an
+# unreliable signal cannot pull the primary number.
 ALL_METRICS = SIGNALS + COMPOSITE_NAMES
 
 
@@ -184,10 +182,12 @@ def compute_cell_aggregates(df: pd.DataFrame) -> pd.DataFrame:
         for sig, stat in cell_stats.columns
     ]
 
-    # Add overall mean per cell (based on 7 individual signals only)
-    signal_mean_cols = [f"{s}_mean" for s in SIGNALS]
-    cell_stats["overall_mean"] = cell_stats[signal_mean_cols].mean(axis=1)
-    cell_stats["overall_std"] = cell_stats[signal_mean_cols].std(axis=1)
+    # overall_mean is computed from PRIMARY_SIGNALS only — exploratory signals
+    # (e.g. identity_narrative_construction) are reported in the appendix and
+    # excluded here so a noisy signal cannot pull the headline number.
+    primary_mean_cols = [f"{s}_mean" for s in PRIMARY_SIGNALS]
+    cell_stats["overall_mean"] = cell_stats[primary_mean_cols].mean(axis=1)
+    cell_stats["overall_std"] = cell_stats[primary_mean_cols].std(axis=1)
 
     return cell_stats
 
@@ -209,8 +209,8 @@ def compute_model_summaries(df: pd.DataFrame) -> pd.DataFrame:
         for sig, stat in model_stats.columns
     ]
 
-    signal_mean_cols = [f"{s}_mean" for s in SIGNALS]
-    model_stats["overall_mean"] = model_stats[signal_mean_cols].mean(axis=1)
+    primary_mean_cols = [f"{s}_mean" for s in PRIMARY_SIGNALS]
+    model_stats["overall_mean"] = model_stats[primary_mean_cols].mean(axis=1)
 
     return model_stats
 
@@ -226,8 +226,8 @@ def compute_trajectory_effects(df: pd.DataFrame) -> pd.DataFrame:
         ["character", "trajectory", "target_model", "run_id"]
     )[ALL_METRICS].mean().reset_index()
 
-    # Add overall score
-    trial_means["overall"] = trial_means[SIGNALS].mean(axis=1)
+    # Add overall score (primary signals only)
+    trial_means["overall"] = trial_means[PRIMARY_SIGNALS].mean(axis=1)
 
     # Add conversation length (actual_turns is constant within a trial)
     trial_turns = df.groupby(
@@ -297,7 +297,7 @@ def compare_models_paired(df: pd.DataFrame) -> pd.DataFrame:
     trial_means = df.groupby(
         ["character", "trajectory", "target_model", "run_id"]
     )[SIGNALS].mean().reset_index()
-    trial_means["overall"] = trial_means[SIGNALS].mean(axis=1)
+    trial_means["overall"] = trial_means[PRIMARY_SIGNALS].mean(axis=1)
 
     cell_means = trial_means.groupby(
         ["character", "trajectory", "target_model"]
@@ -479,7 +479,7 @@ def run_pca(df: pd.DataFrame, output_dir: str):
     print("\nComponent interpretation (|loading| > 0.4):")
     composite_labels = {
         "anthropomorphism_acceptance": "anthro",
-        "identity_narrative_construction": "anthro",
+        "identity_narrative_construction": "exploratory",
         "attachment_language_reception": "attach",
         "proactive_emotional_initiation": "attach",
         "social_substitution_validation": "depend",
@@ -539,13 +539,21 @@ def run_pca(df: pd.DataFrame, output_dir: str):
     logger.info("Saved fig6_pca_loadings")
 
 
-def generate_figures(df: pd.DataFrame, output_dir: str):
-    """Generate publication-ready figures."""
+def generate_figures(df: pd.DataFrame, output_dir: str, include_exploratory: bool = False):
+    """Generate publication-ready figures.
+
+    By default iterates primary signals only in per-signal plots. Pass
+    ``include_exploratory=True`` to also show exploratory signals (e.g.
+    identity_narrative_construction), which are suppressed from headline
+    figures because their cross-judge reliability is below floor.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     os.makedirs(output_dir, exist_ok=True)
+
+    plot_signals = SIGNALS if include_exploratory else PRIMARY_SIGNALS
 
     # Shared color palette for trajectory conditions
     traj_colors = {
@@ -567,7 +575,7 @@ def generate_figures(df: pd.DataFrame, output_dir: str):
     trial_means = df.groupby(
         ["character", "trajectory", "target_model", "run_id"]
     )[ALL_METRICS].mean().reset_index()
-    trial_means["overall"] = trial_means[SIGNALS].mean(axis=1)
+    trial_means["overall"] = trial_means[PRIMARY_SIGNALS].mean(axis=1)
 
     # ===== Figure 1: Overall mean score by model (bar chart) =====
     model_stats = trial_means.groupby("target_model")["overall"].agg(
@@ -625,22 +633,22 @@ def generate_figures(df: pd.DataFrame, output_dir: str):
     logger.info("Saved fig1b_model_composites")
 
     # ===== Figure 2a: Heatmap — signal x model =====
-    model_signal_means = trial_means.groupby("target_model")[SIGNALS].mean()
+    model_signal_means = trial_means.groupby("target_model")[plot_signals].mean()
     # Sort models consistently
     model_signal_means = model_signal_means.loc[
         model_signal_means.mean(axis=1).sort_values().index
     ]
-    short_labels = [s.replace("_", "\n") for s in SIGNALS]
+    short_labels = [s.replace("_", "\n") for s in plot_signals]
 
     fig, ax = plt.subplots(figsize=(10, 5))
     im = ax.imshow(model_signal_means.values, cmap="OrRd", vmin=0, vmax=3, aspect="auto")
-    ax.set_xticks(range(len(SIGNALS)))
+    ax.set_xticks(range(len(plot_signals)))
     ax.set_xticklabels(short_labels, fontsize=8, ha="center")
     ax.set_yticks(range(len(model_signal_means.index)))
     ax.set_yticklabels(model_signal_means.index, fontsize=10)
 
     for i in range(len(model_signal_means.index)):
-        for j in range(len(SIGNALS)):
+        for j in range(len(plot_signals)):
             val = model_signal_means.values[i, j]
             color = "white" if val > 1.5 else "black"
             ax.text(j, i, f"{val:.2f}", ha="center", va="center",
@@ -714,8 +722,8 @@ def generate_figures(df: pd.DataFrame, output_dir: str):
     logger.info("Saved fig3_trajectory_effects")
 
     # ===== Figure 4: Turn-level escalation — overall =====
-    turn_means = df.groupby(["trajectory", "turn"])[SIGNALS].mean().reset_index()
-    turn_means["overall"] = turn_means[SIGNALS].mean(axis=1)
+    turn_means = df.groupby(["trajectory", "turn"])[plot_signals].mean().reset_index()
+    turn_means["overall"] = turn_means[PRIMARY_SIGNALS].mean(axis=1)
 
     fig, ax = plt.subplots(figsize=(8, 5))
     for traj in turn_means["trajectory"].unique():
@@ -821,6 +829,9 @@ def main():
                         help="Check inter-judge reliability across duplicate scorings")
     parser.add_argument("--no-pca", action="store_true",
                         help="Skip PCA analysis")
+    parser.add_argument("--include-exploratory-figures", action="store_true",
+                        help="Include exploratory signals (e.g. identity_narrative_construction) "
+                        "in per-signal figures. Default: suppress from headlines.")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -828,11 +839,37 @@ def main():
     # Load data
     df = load_all_results(args.results_dir)
 
-    # Cell-level aggregates
+    # Cell-level aggregates — split into primary (headline) and appendix (exploratory) CSVs.
     logger.info("Computing cell-level aggregates...")
     cell_stats = compute_cell_aggregates(df)
-    cell_stats.to_csv(os.path.join(args.output_dir, "cell_aggregates.csv"), index=False)
-    logger.info(f"Saved cell_aggregates.csv ({len(cell_stats)} cells)")
+
+    key_cols = ["character", "trajectory", "target_model"]
+    stat_suffixes = ["_mean", "_std", "_count"]
+    primary_cols = key_cols + [
+        f"{s}{suf}" for s in PRIMARY_SIGNALS for suf in stat_suffixes
+    ] + [
+        f"{c}{suf}" for c in COMPOSITE_NAMES for suf in stat_suffixes
+    ] + ["overall_mean", "overall_std"]
+    appendix_cols = key_cols + [
+        f"{s}{suf}" for s in EXPLORATORY_SIGNALS for suf in stat_suffixes
+    ]
+
+    primary_cols = [c for c in primary_cols if c in cell_stats.columns]
+    appendix_cols = [c for c in appendix_cols if c in cell_stats.columns]
+
+    cell_stats[primary_cols].to_csv(
+        os.path.join(args.output_dir, "cell_aggregates.csv"), index=False
+    )
+    logger.info(f"Saved cell_aggregates.csv ({len(cell_stats)} cells, primary signals only)")
+
+    if EXPLORATORY_SIGNALS and appendix_cols != key_cols:
+        cell_stats[appendix_cols].to_csv(
+            os.path.join(args.output_dir, "appendix_aggregates.csv"), index=False
+        )
+        logger.info(
+            f"Saved appendix_aggregates.csv ({len(cell_stats)} cells, "
+            f"exploratory signals: {EXPLORATORY_SIGNALS})"
+        )
 
     # Model summaries
     logger.info("Computing model summaries...")
@@ -917,7 +954,7 @@ def main():
 
     # Figures
     logger.info("Generating figures...")
-    generate_figures(df, args.output_dir)
+    generate_figures(df, args.output_dir, include_exploratory=args.include_exploratory_figures)
 
     print(f"\nAll outputs saved to {args.output_dir}/")
 

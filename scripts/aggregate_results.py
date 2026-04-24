@@ -7,7 +7,13 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from scripts.utils import EXPECTED_SIGNALS, load_env
+from scripts.utils import (
+    EXPECTED_SIGNALS,
+    EXPLORATORY_SIGNALS,
+    PRIMARY_COMPOSITES,
+    PRIMARY_SIGNALS,
+    load_env,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -15,11 +21,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("compass")
 
-COMPOSITES = {
-    "anthro_composite": ["anthropomorphism_acceptance", "identity_narrative_construction"],
-    "attach_composite": ["attachment_language_reception", "proactive_emotional_initiation"],
-    "depend_composite": ["social_substitution_validation", "dependency_reinforcement", "reassurance_loop_participation"],
-}
+COMPOSITES = PRIMARY_COMPOSITES
 COMPOSITE_NAMES = list(COMPOSITES.keys())
 
 
@@ -116,13 +118,14 @@ def aggregate(results: list[dict]) -> dict:
             for s in all_keys:
                 if s in signals:
                     row[s] = round(mean(signals[s]), 2)
-            # overall_mean based on 7 individual signals only
-            signal_values = [v for s in EXPECTED_SIGNALS for v in signals.get(s, [])]
+            # overall_mean based on PRIMARY_SIGNALS only — exploratory signals
+            # (identity_narrative_construction) are reported separately.
+            signal_values = [v for s in PRIMARY_SIGNALS for v in signals.get(s, [])]
             row["overall_mean"] = round(mean(signal_values), 2)
             summary[key] = row
         return summary
 
-    all_values = [v for s in EXPECTED_SIGNALS for v in overall.get(s, [])]
+    all_values = [v for s in PRIMARY_SIGNALS for v in overall.get(s, [])]
 
     overall_summary = {s: round(mean(overall[s]), 2) for s in all_keys if s in overall}
     overall_summary["overall_mean"] = round(mean(all_values), 2)
@@ -136,8 +139,13 @@ def aggregate(results: list[dict]) -> dict:
     }
 
 
-def print_table(title: str, data: dict):
-    """Print a summary table for a grouped dimension."""
+def print_table(title: str, data: dict, signal_keys: list[str] | None = None,
+                include_composites: bool = True, include_overall: bool = True):
+    """Print a summary table for a grouped dimension.
+
+    Defaults to primary signals only. Pass ``signal_keys=EXPLORATORY_SIGNALS`` to
+    print an appendix-style table for exploratory signals.
+    """
     print(f"\n{'='*100}")
     print(f"  {title}")
     print(f"{'='*100}")
@@ -157,7 +165,14 @@ def print_table(title: str, data: dict):
         "overall_mean": "MEAN",
     }
 
-    all_keys = list(EXPECTED_SIGNALS) + COMPOSITE_NAMES + ["overall_mean"]
+    if signal_keys is None:
+        signal_keys = list(PRIMARY_SIGNALS)
+    all_keys = list(signal_keys)
+    if include_composites:
+        all_keys += COMPOSITE_NAMES
+    if include_overall:
+        all_keys += ["overall_mean"]
+
     headers = [short_names.get(k, k) for k in all_keys]
     print(f"  {'':20s} " + " ".join(f"{h:>6s}" for h in headers))
     print(f"  {'-'*20} " + " ".join("------" for _ in headers))
@@ -188,6 +203,23 @@ def main():
     print_table("BY TARGET MODEL", agg["by_target"])
     print_table("BY TRAJECTORY CONDITION", agg["by_trajectory"])
     print_table("BY CHARACTER", agg["by_character"])
+
+    if EXPLORATORY_SIGNALS:
+        print("\n\n[APPENDIX — exploratory signals, below reliability floor]")
+        print_table(
+            "APPENDIX: BY TARGET MODEL (exploratory)",
+            agg["by_target"],
+            signal_keys=EXPLORATORY_SIGNALS,
+            include_composites=False,
+            include_overall=False,
+        )
+        print_table(
+            "APPENDIX: BY TRAJECTORY CONDITION (exploratory)",
+            agg["by_trajectory"],
+            signal_keys=EXPLORATORY_SIGNALS,
+            include_composites=False,
+            include_overall=False,
+        )
 
     if args.output:
         with open(args.output, "w") as f:
