@@ -1,9 +1,11 @@
 """Main orchestrator for the CoMPASS benchmark pipeline."""
 
 import argparse
+import concurrent.futures
 import json
 import logging
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from itertools import product
@@ -343,6 +345,12 @@ def main():
                         help="Explicit opt-in to inline Judge A during --run-all (suppresses the "
                              "cost-guardrail warning). Use only if you specifically need per-trial "
                              "scores immediately, e.g. for a small exploratory run.")
+    parser.add_argument("--concurrency", type=int, default=1,
+                        help="Number of cells to run in parallel (default: 1 = sequential). "
+                             "Each cell's N runs still execute sequentially so the existing "
+                             "transcript-count skip logic stays race-free. Raising above 8 is "
+                             "unlikely to help — the red-team and one provider per cell are the "
+                             "real rate-limit surfaces.")
     parser.add_argument("--batch-status", type=str, default=None,
                         help="Check status of a batch judge job by ID")
     parser.add_argument("--dry-run", action="store_true",
@@ -420,37 +428,68 @@ def main():
             )
             time.sleep(10)
 
-        skipped = 0
-        run_items = []
-        for char, cond, tgt in combos:
+        skipped_counter = {"n": 0}
+        skipped_lock = threading.Lock()
+
+        def run_cell(char: str, cond: str, tgt: str) -> None:
+            """Run all runs_per_cell trials for one cell, sequentially."""
             for run_num in range(1, args.runs_per_cell + 1):
-                run_items.append((char, cond, tgt, run_num))
+                if not args.force:
+                    existing = find_existing_transcripts(char, cond, tgt, args.output_dir)
+                    if len(existing) >= run_num:
+                        logger.info(
+                            f"Skipping {char} x {cond} x {tgt} run {run_num}/{args.runs_per_cell} "
+                            f"— {len(existing)} transcript(s) exist"
+                        )
+                        with skipped_lock:
+                            skipped_counter["n"] += 1
+                        continue
+                try:
+                    if args.runs_per_cell > 1:
+                        logger.info(f"{char} x {cond} x {tgt} run {run_num}/{args.runs_per_cell}")
+                    run_trial(
+                        config, char, cond, tgt, args.turns,
+                        args.output_dir, args.results_dir, args.batch_judge,
+                    )
+                except Exception as e:
+                    logger.error(f"Trial failed ({char} x {cond} x {tgt} run {run_num}): {e}")
 
         try:
             from tqdm import tqdm
-            iterator = tqdm(run_items, desc="Trials", unit="trial")
+            progress = tqdm(total=len(combos), desc="Cells", unit="cell")
         except ImportError:
-            iterator = run_items
+            progress = None
 
-        for char, cond, tgt, run_num in iterator:
-            if not args.force:
-                existing = find_existing_transcripts(char, cond, tgt, args.output_dir)
-                if len(existing) >= run_num:
-                    logger.info(
-                        f"Skipping {char} x {cond} x {tgt} run {run_num}/{args.runs_per_cell} "
-                        f"— {len(existing)} transcript(s) exist"
-                    )
-                    skipped += 1
-                    continue
-            try:
-                if args.runs_per_cell > 1:
-                    logger.info(f"Run {run_num}/{args.runs_per_cell}")
-                run_trial(config, char, cond, tgt, args.turns, args.output_dir, args.results_dir, args.batch_judge)
-            except Exception as e:
-                logger.error(f"Trial failed ({char} x {cond} x {tgt} run {run_num}): {e}")
+        def _tick() -> None:
+            if progress is not None:
+                progress.update(1)
 
-        if skipped:
-            logger.info(f"Skipped {skipped} trials with existing transcripts (use --force to re-run)")
+        if args.concurrency > 1:
+            logger.info(f"Running with --concurrency={args.concurrency} (cross-cell parallelism)")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as executor:
+                futures = [
+                    executor.submit(run_cell, char, cond, tgt)
+                    for char, cond, tgt in combos
+                ]
+                for fut in concurrent.futures.as_completed(futures):
+                    try:
+                        fut.result()
+                    except Exception as e:
+                        logger.error(f"Cell worker raised: {e}")
+                    _tick()
+        else:
+            for char, cond, tgt in combos:
+                run_cell(char, cond, tgt)
+                _tick()
+
+        if progress is not None:
+            progress.close()
+
+        if skipped_counter["n"]:
+            logger.info(
+                f"Skipped {skipped_counter['n']} trials with existing transcripts "
+                f"(use --force to re-run)"
+            )
     else:
         run_trial(
             config,
