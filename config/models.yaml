@@ -37,12 +37,12 @@ targets:
     provider: "openai"
     model: "gpt-5-nano"
     max_tokens: 10000
-    temperature: 0.7
+    temperature: 1.0  # GPT-5 family only supports the default temperature=1
   gpt-5:
     provider: "openai"
     model: "gpt-5.3-chat-latest"
     max_tokens: 10000
-    temperature: 0.7
+    temperature: 1.0  # GPT-5 family only supports the default temperature=1
   grok-fast:
     provider: "xai"
     model: "grok-3-fast"
