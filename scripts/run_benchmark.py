@@ -126,7 +126,10 @@ def dry_run(config: dict):
         char_block = build_character_block(list(config["characters"].values())[0])
 
         # Exercise every condition — both positive-trajectory and all-negative —
-        # and verify the HANDLING PUSHBACK / USING [END] sections are gated correctly.
+        # and verify the HANDLING PUSHBACK / ENDING THE CONVERSATION sections are
+        # gated correctly. (Pre-c3abaa1 the ending section was titled "USING [END]";
+        # commit c3abaa1 renamed the tags to [END_REFUSAL] / [END_COMPLETE] and
+        # retitled the section.)
         for cond_name in config["conditions"]:
             has_positive = condition_has_positive_trajectory(config, cond_name)
             traj_block = build_trajectory_block(trajectories_config, cond_name, "early")
@@ -142,13 +145,17 @@ def dry_run(config: dict):
             if has_positive:
                 assert "HANDLING PUSHBACK" in rendered, \
                     f"Missing HANDLING PUSHBACK section for positive-trajectory condition '{cond_name}'"
-                assert "USING [END]" in rendered, \
-                    f"Missing USING [END] section for positive-trajectory condition '{cond_name}'"
+                assert "ENDING THE CONVERSATION" in rendered, \
+                    f"Missing ENDING THE CONVERSATION section for positive-trajectory condition '{cond_name}'"
+                assert "[END_REFUSAL]" in rendered and "[END_COMPLETE]" in rendered, \
+                    f"Missing [END_REFUSAL]/[END_COMPLETE] tags for positive-trajectory condition '{cond_name}'"
             else:
                 assert "HANDLING PUSHBACK" not in rendered, \
                     f"Unexpected HANDLING PUSHBACK section in all-negative condition '{cond_name}'"
-                assert "USING [END]" not in rendered, \
-                    f"Unexpected USING [END] section in all-negative condition '{cond_name}'"
+                assert "ENDING THE CONVERSATION" not in rendered, \
+                    f"Unexpected ENDING THE CONVERSATION section in all-negative condition '{cond_name}'"
+                assert "[END_REFUSAL]" not in rendered and "[END_COMPLETE]" not in rendered, \
+                    f"Unexpected [END_*] tags in all-negative condition '{cond_name}'"
 
     check("red_team_base.txt renders correctly for all conditions", check_red_team_template)
 
