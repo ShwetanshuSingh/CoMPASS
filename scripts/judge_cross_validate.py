@@ -67,7 +67,7 @@ def _build_anthropic_params(
         "max_tokens": max_tokens,
         "temperature": temperature,
         "system": [
-            {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}
+            {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral", "ttl": "1h"}}
         ],
         "messages": [{"role": "user", "content": user_message}],
     }

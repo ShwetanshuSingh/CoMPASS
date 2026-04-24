@@ -95,7 +95,7 @@ class Judge:
                     {
                         "type": "text",
                         "text": self.system_prompt,
-                        "cache_control": {"type": "ephemeral"}
+                        "cache_control": {"type": "ephemeral", "ttl": "1h"}
                     }
                 ],
                 messages=messages,
