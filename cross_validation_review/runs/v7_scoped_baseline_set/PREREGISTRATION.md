@@ -49,4 +49,28 @@ Otherwise KEEP v6 (leave `prompts/judge_system.txt` unchanged).
 
 ## Outcome
 
-_(To be filled in after comparison is generated.)_
+Comparison completed 2026-04-24T07:27Z. See `comparison/comparison.md` for full tables. Apples-to-apples intersection = 32 transcripts (7 v7 Sonnet responses dropped `proactive_emotional_initiation` on some turns and failed validation; 5 of those were also scored by v6, 2 were not — hence the 32-transcript intersection rather than the full 40).
+
+### Primary outcomes (32-transcript intersection)
+
+| composite | v6 ρ | v7 ρ | Δ | threshold | pass? |
+|---|---|---|---|---|---|
+| anthro_composite | 0.550 | **0.521** | −0.029 | ≥ 0.62 | **NO** |
+| depend_composite | 0.813 | **0.796** | −0.017 | ≥ 0.78 | YES |
+
+For reference, the prior v5 vs v6 comparison (34-transcript intersection) reported v5 anthro_composite ρ = 0.647 and v6 = 0.561. The v7 anthro_composite at 0.521 is below both.
+
+### Per-signal rho
+
+The per-dependency-signal ρ improved under v7 (+0.069 on social_substitution, +0.033 on dependency_reinforcement, +0.037 on reassurance_loop), consistent with the hypothesis that scoping the baseline per-signal gives cleaner dependency scoring. The composite dropped slightly because it averages noisy cells; the raw dependency-signal gains are real but modest.
+
+anthropomorphism_acceptance (−0.035) and identity_narrative_construction (−0.017) both fell from v6 to v7. Removing the standalone paragraph did not recover anthro scoring; if anything, it got slightly worse. The anthro regression appears to be structural to any contextual-baseline instruction, not just a leakage artifact from the v6 paragraph's position.
+
+### Decision
+
+Pre-registered rule requires BOTH thresholds. v7 fails the anthro_composite threshold (0.521 < 0.62). **Decision: KEEP v6.** `prompts/judge_system.txt` (currently v5; v6 was never promoted) is not modified by this experiment.
+
+### Note for the paper
+
+The v7 experiment rules out "positional leakage" as the explanation for v6's anthro regression. The regression persists even when the baseline is explicitly signal-scoped and removed from shared anchor space. Candidate alternative explanations (not tested here): contextual-baseline language globally raises the judge's threshold for "above-neutral" scoring across all affective signals, or Sonnet-vs-GPT-5.2 rubric interpretation differences amplify under any calibration instruction. Either would be material for a methods note.
+
