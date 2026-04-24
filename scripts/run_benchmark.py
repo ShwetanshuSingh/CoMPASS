@@ -336,7 +336,13 @@ def main():
                         help="Re-run trials even if transcripts already exist")
     parser.add_argument("--judge-only", action="store_true", help="Only score existing transcripts")
     parser.add_argument("--batch-judge", action="store_true",
-                        help="Use Batch API for judge scoring (50%% cost reduction, 24h turnaround)")
+                        help="Skip inline Judge A during transcript generation so scoring runs via "
+                             "Batch API later (50%% discount). Strongly recommended for --run-all: "
+                             "without this flag, Judge A runs inline AND again via batch, doubling cost.")
+    parser.add_argument("--inline-judge", action="store_true",
+                        help="Explicit opt-in to inline Judge A during --run-all (suppresses the "
+                             "cost-guardrail warning). Use only if you specifically need per-trial "
+                             "scores immediately, e.g. for a small exploratory run.")
     parser.add_argument("--batch-status", type=str, default=None,
                         help="Check status of a batch judge job by ID")
     parser.add_argument("--dry-run", action="store_true",
@@ -392,6 +398,27 @@ def main():
             f"{len(conditions)} conditions x {len(targets)} targets "
             f"x {args.runs_per_cell} run(s) = {total_runs} trials"
         )
+
+        if not args.batch_judge and not args.inline_judge:
+            logger.warning(
+                "\n"
+                + "=" * 78 + "\n"
+                + "COST GUARDRAIL: --run-all without --batch-judge\n"
+                + "-" * 78 + "\n"
+                + "Judge A will run inline for each of the "
+                + f"{total_runs} trials, then again via\n"
+                + "the batched cross-validation pass — you will be billed twice for Judge A.\n"
+                + "\n"
+                + "Recommended: re-run with --batch-judge so inline scoring is skipped and\n"
+                + "all scoring happens via the 50%-discounted Batch API later.\n"
+                + "\n"
+                + "Pass --inline-judge to silence this warning if inline scoring is genuinely\n"
+                + "intended (e.g. small exploratory runs needing immediate scores).\n"
+                + "\n"
+                + "Pausing 10 seconds — Ctrl-C now if this was unintentional.\n"
+                + "=" * 78
+            )
+            time.sleep(10)
 
         skipped = 0
         run_items = []
