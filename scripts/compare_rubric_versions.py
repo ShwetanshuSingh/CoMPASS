@@ -296,28 +296,31 @@ def build_comparison(v5_path: Path, v6_path: Path) -> dict:
     }
 
 
-def render_markdown(c: dict) -> str:
+def render_markdown(c: dict, label_a: str = "v5", label_b: str = "v6") -> str:
+    """Render the comparison as markdown. Labels rename the two rubric columns;
+    they do not change the JSON keys (which remain 'v5' and 'v6' for
+    backward compatibility)."""
     p = c["primary_outcome"]
     cov = c["coverage"]
     lines = []
-    lines.append("# Rubric v5 → v6 comparison (contextual baseline pre-reg)")
+    lines.append(f"# Rubric {label_a} → {label_b} comparison")
     lines.append("")
-    lines.append(f"- v5 transcripts scored: **{cov['v5_transcripts']}**")
-    lines.append(f"- v6 transcripts scored: **{cov['v6_transcripts']}**")
+    lines.append(f"- {label_a} transcripts scored: **{cov['v5_transcripts']}**")
+    lines.append(f"- {label_b} transcripts scored: **{cov['v6_transcripts']}**")
     lines.append(f"- intersection (apples-to-apples): **{cov['intersection_size']}**")
     if cov["v5_only"]:
-        lines.append(f"- only in v5: {cov['v5_only']}")
+        lines.append(f"- only in {label_a}: {cov['v5_only']}")
     if cov["v6_only"]:
-        lines.append(f"- only in v6: {cov['v6_only']}")
+        lines.append(f"- only in {label_b}: {cov['v6_only']}")
     lines.append("")
     lines.append("## Primary outcome: depend_composite Spearman ρ")
     lines.append("")
     v5 = p["v5"]; v6 = p["v6"]
     lines.append(f"| rubric | ρ | p | n |")
     lines.append(f"|---|---|---|---|")
-    lines.append(f"| v5 | {v5['rho']:.3f} | {v5['p']:.2e} | {v5['n']} |")
-    lines.append(f"| v6 | {v6['rho']:.3f} | {v6['p']:.2e} | {v6['n']} |")
-    lines.append(f"| Δ (v6−v5) | {p['delta']:+.3f} | | |")
+    lines.append(f"| {label_a} | {v5['rho']:.3f} | {v5['p']:.2e} | {v5['n']} |")
+    lines.append(f"| {label_b} | {v6['rho']:.3f} | {v6['p']:.2e} | {v6['n']} |")
+    lines.append(f"| Δ ({label_b}−{label_a}) | {p['delta']:+.3f} | | |")
     lines.append("")
     lines.append(f"**Decision (threshold ρ ≥ {p['threshold']}):** `{p['decision_v6']}`")
     lines.append("")
@@ -325,14 +328,14 @@ def render_markdown(c: dict) -> str:
     lines.append("")
     lines.append("### Per-dependency-signal ρ")
     lines.append("")
-    lines.append("| signal | v5 ρ | v6 ρ | Δ |")
+    lines.append(f"| signal | {label_a} ρ | {label_b} ρ | Δ |")
     lines.append("|---|---|---|---|")
     for sig, row in c["secondary_outcomes"]["per_dependency_signal_rho"].items():
         lines.append(f"| {sig} | {row['v5']['rho']:.3f} | {row['v6']['rho']:.3f} | {row['delta']:+.3f} |")
     lines.append("")
     lines.append("### Per-condition depend_composite ρ")
     lines.append("")
-    lines.append("| condition | n cells | v5 ρ | v6 ρ | Δ |")
+    lines.append(f"| condition | n cells | {label_a} ρ | {label_b} ρ | Δ |")
     lines.append("|---|---|---|---|---|")
     for cond, row in c["secondary_outcomes"]["per_condition_depend_composite_rho"].items():
         if row.get("n_cells", 0) == 0:
@@ -345,7 +348,7 @@ def render_markdown(c: dict) -> str:
     lines.append("")
     lines.append("### Mean |Δ| on dependency signals by turn phase")
     lines.append("")
-    lines.append("| phase | v5 MAD | v5 n | v6 MAD | v6 n |")
+    lines.append(f"| phase | {label_a} MAD | {label_a} n | {label_b} MAD | {label_b} n |")
     lines.append("|---|---|---|---|---|")
     v5p = c["secondary_outcomes"]["depend_signals_mad_by_turn_phase"]["v5"]
     v6p = c["secondary_outcomes"]["depend_signals_mad_by_turn_phase"]["v6"]
@@ -364,15 +367,15 @@ def render_markdown(c: dict) -> str:
     lines.append("")
     lines.append("| rubric | disagreements | B > A | % B > A |")
     lines.append("|---|---|---|---|")
-    for ver in ("v5", "v6"):
+    for ver, display in (("v5", label_a), ("v6", label_b)):
         d = c["secondary_outcomes"]["depend_signals_directional_bias"][ver]
         pct = d["pct_b_higher"]
         pct_s = f"{pct*100:.1f}%" if not math.isnan(pct) else "—"
-        lines.append(f"| {ver} | {d['n_disagreements']} | {d['n_b_higher']} | {pct_s} |")
+        lines.append(f"| {display} | {d['n_disagreements']} | {d['n_b_higher']} | {pct_s} |")
     lines.append("")
     lines.append("## All signals + composites (ρ on intersection)")
     lines.append("")
-    lines.append("| signal / composite | v5 ρ | v6 ρ | Δ |")
+    lines.append(f"| signal / composite | {label_a} ρ | {label_b} ρ | Δ |")
     lines.append("|---|---|---|---|")
     for sig, row in c["extras"]["per_signal_all_rho"].items():
         lines.append(f"| {sig} | {row['v5']['rho']:.3f} | {row['v6']['rho']:.3f} | {row['delta']:+.3f} |")
@@ -384,24 +387,30 @@ def render_markdown(c: dict) -> str:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--v5", required=True, help="Path to v5 cross_validation_results.json")
-    ap.add_argument("--v6", required=True, help="Path to v6 cross_validation_results.json")
+    ap.add_argument("--v5", required=True, help="Path to baseline-rubric cross_validation_results.json (column A)")
+    ap.add_argument("--v6", required=True, help="Path to treatment-rubric cross_validation_results.json (column B)")
     ap.add_argument("--output-dir", required=True, help="Dir for comparison.json + comparison.md")
+    ap.add_argument("--label-a", default="v5", help="Display label for column A (default: v5)")
+    ap.add_argument("--label-b", default="v6", help="Display label for column B (default: v6)")
     args = ap.parse_args()
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     comparison = build_comparison(Path(args.v5), Path(args.v6))
+    comparison["sources"]["label_a"] = args.label_a
+    comparison["sources"]["label_b"] = args.label_b
 
     (out_dir / "comparison.json").write_text(json.dumps(comparison, indent=2))
-    (out_dir / "comparison.md").write_text(render_markdown(comparison))
+    (out_dir / "comparison.md").write_text(
+        render_markdown(comparison, label_a=args.label_a, label_b=args.label_b)
+    )
 
     p = comparison["primary_outcome"]
     print(f"Wrote {out_dir / 'comparison.json'} and {out_dir / 'comparison.md'}")
     print(f"Intersection: {comparison['coverage']['intersection_size']} transcripts")
     print(
-        f"Primary: v5 ρ={p['v5']['rho']:.3f} → v6 ρ={p['v6']['rho']:.3f} "
+        f"Primary: {args.label_a} ρ={p['v5']['rho']:.3f} → {args.label_b} ρ={p['v6']['rho']:.3f} "
         f"(Δ={p['delta']:+.3f}); decision=`{p['decision_v6']}`"
     )
 
