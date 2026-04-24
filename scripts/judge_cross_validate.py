@@ -100,7 +100,8 @@ def _call_anthropic_judge(
     max_retries = 6
     for attempt in range(max_retries):
         try:
-            response = client.messages.create(**params)
+            with client.messages.stream(**params) as stream:
+                response = stream.get_final_message()
             if not response.content:
                 raise RuntimeError(f"Empty response from anthropic/{model}")
             return response.content[0].text

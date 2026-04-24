@@ -40,11 +40,17 @@ class Judge:
         self.temperature = config["judge"]["temperature"]
 
     def _call_with_retry(self, **kwargs) -> anthropic.types.Message:
-        """Call Anthropic API with rate-limit-aware retries."""
+        """Call Anthropic API with rate-limit-aware retries.
+
+        Uses streaming because the judge's configured max_tokens (32k) puts the
+        estimated request duration over the SDK's 10-minute non-streaming cap.
+        The stream is collected into a final Message for downstream code.
+        """
         max_retries = 6
         for attempt in range(max_retries):
             try:
-                return self.client.messages.create(**kwargs)
+                with self.client.messages.stream(**kwargs) as stream:
+                    return stream.get_final_message()
             except anthropic.RateLimitError as e:
                 if attempt == max_retries - 1:
                     raise
