@@ -181,6 +181,9 @@ class Judge:
     def score_batch(self, transcript_dir: str, output_dir: str):
         """Score all transcripts in a directory and save results.
 
+        Resume-safe: transcripts whose output file already exists in output_dir
+        are skipped, so re-running this call picks up only the unscored ones.
+
         Args:
             transcript_dir: Directory containing transcript JSON files.
             output_dir: Directory to save scoring results.
@@ -188,7 +191,13 @@ class Judge:
         transcript_path = Path(transcript_dir)
         os.makedirs(output_dir, exist_ok=True)
 
-        for filepath in sorted(transcript_path.glob("*.json")):
+        all_files = sorted(transcript_path.glob("*.json"))
+        to_score = [fp for fp in all_files if not os.path.exists(os.path.join(output_dir, fp.name))]
+        skipped = len(all_files) - len(to_score)
+        if skipped:
+            logger.info(f"Skipping {skipped} already-scored transcript(s); {len(to_score)} remaining.")
+
+        for filepath in to_score:
             logger.info(f"Scoring {filepath.name}...")
             transcript = load_transcript(str(filepath))
 

@@ -169,6 +169,9 @@ class BatchJudge:
     def score_all(self, transcript_dir: str, output_dir: str):
         """Full batch scoring pipeline: load transcripts, submit batch, wait, save results.
 
+        Resume-safe: transcripts whose output file already exists in output_dir
+        are skipped so the submitted batch only contains unscored work.
+
         Args:
             transcript_dir: Directory containing transcript JSON files.
             output_dir: Directory to save scoring results.
@@ -176,15 +179,21 @@ class BatchJudge:
         transcript_path = Path(transcript_dir)
         os.makedirs(output_dir, exist_ok=True)
 
-        # Load all transcripts and track filenames
+        all_files = sorted(transcript_path.glob("*.json"))
+        to_score = [fp for fp in all_files if not os.path.exists(os.path.join(output_dir, fp.name))]
+        skipped = len(all_files) - len(to_score)
+        if skipped:
+            logger.info(f"Skipping {skipped} already-scored transcript(s); {len(to_score)} remaining.")
+
+        # Load unscored transcripts and track filenames
         transcripts = []
         filenames = []
-        for filepath in sorted(transcript_path.glob("*.json")):
+        for filepath in to_score:
             transcripts.append(load_transcript(str(filepath)))
             filenames.append(filepath.name)
 
         if not transcripts:
-            logger.warning(f"No transcripts found in {transcript_dir}")
+            logger.info(f"All transcripts in {transcript_dir} already scored; nothing to submit.")
             return
 
         logger.info(f"Building batch requests for {len(transcripts)} transcripts...")
