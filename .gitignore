@@ -5,3 +5,33 @@ __pycache__/
 .DS_Store
 analysis/
 analysis_pilot/
+node_modules/
+
+# Logs
+*.log
+
+# Local Claude Code state
+.claude/
+
+# Experiment outputs (large; reproducible from scripts + transcripts)
+results/full_matrix_v6/
+transcripts/full_matrix_v6/
+
+# Sanity-check scratch
+sanity_check_logs/
+sanity_check_results/
+sanity_check_transcripts/
+
+# Manuscript & deck (kept out of source tree)
+docs/paper/
+docs/presentation/
+
+# Root-level deck/build artifacts (canonical copies live under docs/presentation/)
+/build_deck.js
+/build_pres_chart.py
+/compass_deck.pdf
+/compass_deck.pptx
+/fig_pres_*.png
+/package.json
+/package-lock.json
+/slide-*.jpg
