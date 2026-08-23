@@ -13,6 +13,12 @@ node_modules/
 # Local Claude Code state
 .claude/
 
+# Byte-identical duplicates of the canonical release tree below (same md5 over
+# all 800 transcripts). The run scripts wrote to both layouts; full_matrix_v6/
+# is the one we publish, so keep these two out.
+results/full_matrix_v6/
+transcripts/full_matrix_v6/
+
 # The v6 full matrix IS the release: full_matrix_v6/transcripts/ (800) and
 # full_matrix_v6/results/judge_{a,b}_scores/ (800 each) are tracked on purpose.
 # Excluded below is only batch-API scaffolding and regenerable analysis output.
