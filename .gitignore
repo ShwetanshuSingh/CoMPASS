@@ -13,18 +13,29 @@ node_modules/
 # Local Claude Code state
 .claude/
 
-# Experiment outputs (large; reproducible from scripts + transcripts)
-results/full_matrix_v6/
-transcripts/full_matrix_v6/
+# The v6 full matrix IS the release: full_matrix_v6/transcripts/ (800) and
+# full_matrix_v6/results/judge_{a,b}_scores/ (800 each) are tracked on purpose.
+# Excluded below is only batch-API scaffolding and regenerable analysis output.
+full_matrix_v6/results/cross_validation/judge_a_raw_brief/
+full_matrix_v6/results/cross_validation/judge_a_raw_partial/
+full_matrix_v6/results/cross_validation/judge_b_chunks/
+full_matrix_v6/results/cross_validation/openai_input.jsonl
+full_matrix_v6/results/cross_validation/batch_state.json*
+full_matrix_v6/results/cross_validation/missing_judge_a.json
+full_matrix_v6/results/analysis_judge_b/
+full_matrix_v6.zip
+judge_scores_by_turn.csv
 
 # Sanity-check scratch
 sanity_check_logs/
 sanity_check_results/
 sanity_check_transcripts/
 
-# Manuscript & deck (kept out of source tree)
+# Manuscript & deck (kept out of source tree; Overleaf is the source of truth)
 docs/paper/
 docs/presentation/
+docs/bialign/
+docs/.paper-backup-*/
 
 # Root-level deck/build artifacts (canonical copies live under docs/presentation/)
 /build_deck.js
