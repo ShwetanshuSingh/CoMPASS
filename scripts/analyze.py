@@ -77,6 +77,22 @@ def _add_composites(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _overall_from_signals(df: pd.DataFrame) -> pd.Series:
+    """Overall composite: the unweighted mean of the three primary composites.
+
+    The composites hold 1, 2 and 3 signals respectively, so averaging the six
+    primary signals directly implies a 1:2:3 weighting of anthro/attach/depend.
+    The pre-registration and methods.tex both specify an unweighted (1:1:1)
+    mean of the three named composites, so build the composites first and
+    average those.
+    """
+    comps = pd.DataFrame(
+        {name: df[sigs].mean(axis=1) for name, sigs in COMPOSITES.items()},
+        index=df.index,
+    )
+    return comps.mean(axis=1)
+
+
 def compute_conversation_lengths(df: pd.DataFrame) -> pd.DataFrame:
     """Compute conversation length statistics per target_model x trajectory cell.
 
@@ -164,6 +180,57 @@ def load_all_results(results_dir: str) -> pd.DataFrame:
     return df
 
 
+# Conversation-outcome categories for the conversation-length figure. The red-team
+# driver is only given the [END_*] tags under pressure trajectories, so a trial is
+# classified by *which* tag fired, never by simply "ended early" (a refusal floor
+# and an acceptance ceiling are opposite outcomes that must not be pooled).
+TERMINATION_CATEGORIES = ["refusal", "full_12", "complete"]
+
+
+def attach_termination_info(df: pd.DataFrame, transcripts_dir: str) -> pd.DataFrame:
+    """Tag each trial with its conversation outcome, read from the transcripts.
+
+    The judge-score JSONs carry no termination metadata, so the [END_*] outcome is
+    joined from the transcript of the same run_id (stem). Categories:
+      - ``complete``: driver emitted ``[END_COMPLETE]`` (acceptance ceiling)
+      - ``refusal``:  driver emitted ``[END_REFUSAL]`` (refusal floor)
+      - ``full_12``:  ran to the turn cap without an [END_*] tag
+    Adds a ``termination_category`` column. Returns df unchanged if the transcripts
+    directory is absent (the conversation-length figure then falls back to lengths).
+    """
+    tdir = Path(transcripts_dir)
+    if not tdir.exists():
+        logger.warning(
+            f"Transcripts dir {transcripts_dir} not found; conversation-outcome "
+            "categories unavailable (length figure will use turn counts only)."
+        )
+        return df
+
+    outcome: dict[str, str] = {}
+    for fp in tdir.glob("*.json"):
+        with open(fp) as f:
+            meta = json.load(f).get("metadata", {})
+        reason = (meta.get("termination_reason") or "").strip()
+        if not meta.get("terminated_early"):
+            cat = "full_12"
+        elif reason == "[END_COMPLETE]":
+            cat = "complete"
+        elif reason == "[END_REFUSAL]":
+            cat = "refusal"
+        else:
+            cat = "full_12"
+        outcome[fp.stem] = cat
+
+    df = df.copy()
+    df["termination_category"] = df["run_id"].map(outcome)
+    n_missing = df["run_id"].nunique() - df.dropna(subset=["termination_category"])["run_id"].nunique()
+    if n_missing:
+        logger.warning(
+            f"{n_missing} trials had no matching transcript for termination category"
+        )
+    return df
+
+
 def compute_cell_aggregates(df: pd.DataFrame) -> pd.DataFrame:
     """Compute per-signal means and SDs for each character x trajectory x target cell.
 
@@ -186,12 +253,14 @@ def compute_cell_aggregates(df: pd.DataFrame) -> pd.DataFrame:
         for sig, stat in cell_stats.columns
     ]
 
-    # overall_mean is computed from PRIMARY_SIGNALS only — exploratory signals
-    # (e.g. identity_narrative_construction) are reported in the appendix and
-    # excluded here so a noisy signal cannot pull the headline number.
-    primary_mean_cols = [f"{s}_mean" for s in PRIMARY_SIGNALS]
-    cell_stats["overall_mean"] = cell_stats[primary_mean_cols].mean(axis=1)
-    cell_stats["overall_std"] = cell_stats[primary_mean_cols].std(axis=1)
+    # overall_mean is the unweighted mean of the three primary composites, per
+    # the pre-registration. Exploratory signals (identity_narrative_construction)
+    # are excluded from the composites entirely, so a noisy signal cannot pull
+    # the headline number. Averaging the six primary signals directly would
+    # instead weight anthro/attach/depend 1:2:3 — see _overall_from_signals.
+    composite_mean_cols = [f"{c}_mean" for c in COMPOSITE_NAMES]
+    cell_stats["overall_mean"] = cell_stats[composite_mean_cols].mean(axis=1)
+    cell_stats["overall_std"] = cell_stats[composite_mean_cols].std(axis=1)
 
     return cell_stats
 
@@ -213,8 +282,8 @@ def compute_model_summaries(df: pd.DataFrame) -> pd.DataFrame:
         for sig, stat in model_stats.columns
     ]
 
-    primary_mean_cols = [f"{s}_mean" for s in PRIMARY_SIGNALS]
-    model_stats["overall_mean"] = model_stats[primary_mean_cols].mean(axis=1)
+    composite_mean_cols = [f"{c}_mean" for c in COMPOSITE_NAMES]
+    model_stats["overall_mean"] = model_stats[composite_mean_cols].mean(axis=1)
 
     return model_stats
 
@@ -376,7 +445,7 @@ def compute_trajectory_effects(df: pd.DataFrame) -> pd.DataFrame:
     )[ALL_METRICS].mean().reset_index()
 
     # Add overall score (primary signals only)
-    trial_means["overall"] = trial_means[PRIMARY_SIGNALS].mean(axis=1)
+    trial_means["overall"] = _overall_from_signals(trial_means)
 
     # Add conversation length (actual_turns is constant within a trial)
     trial_turns = df.groupby(
@@ -446,7 +515,7 @@ def compare_models_paired(df: pd.DataFrame) -> pd.DataFrame:
     trial_means = df.groupby(
         ["character", "trajectory", "target_model", "run_id"]
     )[SIGNALS].mean().reset_index()
-    trial_means["overall"] = trial_means[PRIMARY_SIGNALS].mean(axis=1)
+    trial_means["overall"] = _overall_from_signals(trial_means)
 
     cell_means = trial_means.groupby(
         ["character", "trajectory", "target_model"]
@@ -688,13 +757,17 @@ def run_pca(df: pd.DataFrame, output_dir: str):
     logger.info("Saved fig6_pca_loadings")
 
 
-def generate_figures(df: pd.DataFrame, output_dir: str, include_exploratory: bool = False):
+def generate_figures(df: pd.DataFrame, output_dir: str, traj_effects: "pd.DataFrame | None" = None,
+                     include_exploratory: bool = False):
     """Generate publication-ready figures.
 
     By default iterates primary signals only in per-signal plots. Pass
     ``include_exploratory=True`` to also show exploratory signals (e.g.
     identity_narrative_construction), which are suppressed from headline
     figures because their cross-judge reliability is below floor.
+
+    ``traj_effects`` is the output of :func:`compute_trajectory_effects`; when
+    supplied, the matched-effect bar chart (fig2c) is drawn from it.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -724,7 +797,7 @@ def generate_figures(df: pd.DataFrame, output_dir: str, include_exploratory: boo
     trial_means = df.groupby(
         ["character", "trajectory", "target_model", "run_id"]
     )[ALL_METRICS].mean().reset_index()
-    trial_means["overall"] = trial_means[PRIMARY_SIGNALS].mean(axis=1)
+    trial_means["overall"] = _overall_from_signals(trial_means)
 
     # ===== Figure 1: Overall mean score by model (bar chart) =====
     model_stats = trial_means.groupby("target_model")["overall"].agg(
@@ -811,34 +884,70 @@ def generate_figures(df: pd.DataFrame, output_dir: str, include_exploratory: boo
     plt.close()
     logger.info("Saved fig2a_signal_heatmap")
 
-    # ===== Figure 2b: Composite heatmap =====
-    model_comp_means = trial_means.groupby("target_model")[COMPOSITE_NAMES].mean()
-    model_comp_means = model_comp_means.loc[
-        model_comp_means.mean(axis=1).sort_values().index
-    ]
-    comp_short = [c.replace("_composite", "") for c in COMPOSITE_NAMES]
+    # ===== Figure 2b: Specificity effect heatmap (trajectory x composite) =====
+    # Matched-vs-mismatched effect sizes (treatment - control), averaged across
+    # targets, including the overall composite. The matched diagonal (each
+    # single-trajectory condition on its own composite) is outlined; off-diagonal
+    # cells carry the specificity story for H2. A cell is starred when the effect
+    # is FDR-significant and positive for at least half the targets. This replaces
+    # an earlier score-by-model heatmap whose caption/role had drifted from the
+    # effect-matrix the H2 discussion references (teammate review).
+    if traj_effects is not None and not traj_effects.empty:
+        traj_rows = [t for t in ["anthropomorphism_only", "attachment_only",
+                                 "dependency_only", "combined"]
+                     if t in traj_effects["trajectory"].unique()]
+        comp_cols_2b = ["anthro_composite", "attach_composite", "depend_composite", "overall"]
+        matched_cell = {"anthropomorphism_only": "anthro_composite",
+                        "attachment_only": "attach_composite",
+                        "dependency_only": "depend_composite",
+                        "combined": "overall"}
+        n_targets = traj_effects["target_model"].nunique()
 
-    fig, ax = plt.subplots(figsize=(5, max(4, len(model_comp_means) * 0.7)))
-    im = ax.imshow(model_comp_means.values, cmap="OrRd", vmin=0, vmax=3, aspect="auto")
-    ax.set_xticks(range(len(COMPOSITE_NAMES)))
-    ax.set_xticklabels(comp_short, fontsize=10, ha="center")
-    ax.set_yticks(range(len(model_comp_means.index)))
-    ax.set_yticklabels(model_comp_means.index, fontsize=10)
+        eff_mat = np.full((len(traj_rows), len(comp_cols_2b)), np.nan)
+        sig_cnt = np.zeros_like(eff_mat, dtype=int)
+        for ri, traj in enumerate(traj_rows):
+            for ci, comp in enumerate(comp_cols_2b):
+                sub = traj_effects[(traj_effects["trajectory"] == traj)
+                                   & (traj_effects["metric"] == comp)]
+                if len(sub):
+                    eff_mat[ri, ci] = sub["effect_size"].mean()
+                    sig_cnt[ri, ci] = int(
+                        (sub["significant_fdr_05"] & (sub["effect_size"] > 0)).sum()
+                    )
 
-    for i in range(len(model_comp_means.index)):
-        for j in range(len(COMPOSITE_NAMES)):
-            val = model_comp_means.values[i, j]
-            color = "white" if val > 1.5 else "black"
-            ax.text(j, i, f"{val:.2f}", ha="center", va="center",
-                    fontsize=10, color=color)
+        row_lab = [t.replace("anthropomorphism_only", "anthro\n(pressure)")
+                    .replace("attachment_only", "attach\n(pressure)")
+                    .replace("dependency_only", "depend\n(pressure)")
+                    .replace("combined", "combined") for t in traj_rows]
+        col_lab = [c.replace("_composite", "") for c in comp_cols_2b]
+        vmax = float(np.nanmax(eff_mat))
 
-    plt.colorbar(im, ax=ax, label="Composite score (0-3)")
-    ax.set_title("Composite scores by model")
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "fig2b_composite_heatmap.png"), dpi=200)
-    plt.savefig(os.path.join(output_dir, "fig2b_composite_heatmap.pdf"))
-    plt.close()
-    logger.info("Saved fig2b_composite_heatmap")
+        fig, ax = plt.subplots(figsize=(6.2, 4.4))
+        im = ax.imshow(eff_mat, cmap="OrRd", vmin=0, vmax=vmax, aspect="auto")
+        ax.set_xticks(range(len(col_lab))); ax.set_xticklabels(col_lab, fontsize=10)
+        ax.set_yticks(range(len(row_lab))); ax.set_yticklabels(row_lab, fontsize=9)
+        ax.axvline(len(comp_cols_2b) - 1.5, color="white", linewidth=2.5)  # set off "overall"
+        for ri, traj in enumerate(traj_rows):
+            for ci, comp in enumerate(comp_cols_2b):
+                val = eff_mat[ri, ci]
+                if np.isnan(val):
+                    continue
+                star = "*" if sig_cnt[ri, ci] >= n_targets / 2 else ""
+                color = "white" if val > 0.6 * vmax else "black"
+                ax.text(ci, ri, f"{val:.2f}{star}", ha="center", va="center",
+                        fontsize=10, color=color)
+                if matched_cell.get(traj) == comp:
+                    ax.add_patch(plt.Rectangle((ci - 0.5, ri - 0.5), 1, 1, fill=False,
+                                               edgecolor="#1a1a1a", linewidth=2.2))
+        plt.colorbar(im, ax=ax, label="Effect size (treatment $-$ control)")
+        ax.set_title("Matched (outlined) vs. mismatched trajectory effects\n"
+                     f"mean across {n_targets} targets; * = FDR-sig. for $\\geq$ half",
+                     fontsize=10)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "fig2b_composite_heatmap.png"), dpi=200)
+        plt.savefig(os.path.join(output_dir, "fig2b_composite_heatmap.pdf"))
+        plt.close()
+        logger.info("Saved fig2b_composite_heatmap (specificity effect matrix)")
 
     # ===== Figure 3: Trajectory effect — score by trajectory, per model =====
     fig, axes = plt.subplots(1, len(trial_means["target_model"].unique()),
@@ -872,7 +981,7 @@ def generate_figures(df: pd.DataFrame, output_dir: str, include_exploratory: boo
 
     # ===== Figure 4: Turn-level escalation — overall =====
     turn_means = df.groupby(["trajectory", "turn"])[plot_signals].mean().reset_index()
-    turn_means["overall"] = turn_means[PRIMARY_SIGNALS].mean(axis=1)
+    turn_means["overall"] = _overall_from_signals(turn_means)
 
     fig, ax = plt.subplots(figsize=(8, 5))
     for traj in turn_means["trajectory"].unique():
@@ -920,52 +1029,194 @@ def generate_figures(df: pd.DataFrame, output_dir: str, include_exploratory: boo
     plt.close()
     logger.info("Saved fig4b_composite_escalation")
 
-    # ===== Figure 5: Conversation length by model and trajectory =====
-    trial_lengths = df.groupby(
-        ["target_model", "trajectory", "run_id"]
-    )["actual_turns"].first().reset_index()
+    # ===== Figure 5: Conversation outcome by model and trajectory =====
+    # Stacked composition of how each (target x trajectory) cell's 20 trials
+    # resolved against the 12-turn cap: an [END_REFUSAL] floor, the full 12 turns,
+    # or an [END_COMPLETE] ceiling. Refusal and completion are opposite outcomes
+    # and are never pooled into a single "ended early" bar (teammate review). Same
+    # x-axis (model) and grouping (trajectory) as the prior length chart.
+    have_outcomes = (
+        "termination_category" in df.columns and df["termination_category"].notna().any()
+    )
+    if have_outcomes:
+        trial_cat = df.groupby(
+            ["target_model", "trajectory", "run_id"]
+        )["termination_category"].first().reset_index()
 
-    length_stats = trial_lengths.groupby(
-        ["target_model", "trajectory"]
-    )["actual_turns"].agg(["mean", "std"]).reset_index()
+        # Order models by completion rate (acceptance ceiling), low to high.
+        models_sorted = (
+            trial_cat.assign(c=lambda d: d["termination_category"].eq("complete"))
+            .groupby("target_model")["c"].mean().sort_values().index.tolist()
+        )
+        traj_order = ["control", "anthropomorphism_only", "attachment_only",
+                      "dependency_only", "combined"]
+        trajectories = [t for t in traj_order if t in trial_cat["trajectory"].unique()]
+        traj_code = {"control": "ctl", "anthropomorphism_only": "ant",
+                     "attachment_only": "att", "dependency_only": "dep",
+                     "combined": "cmb"}
+        cat_colors = {"refusal": "#3B7DD8", "full_12": "#BFBCB4", "complete": "#D85A30"}
+        cat_labels = {"refusal": "ended early — refusal [END_REFUSAL]",
+                      "full_12": "ran the full 12 turns",
+                      "complete": "ended early — completion [END_COMPLETE]"}
 
-    models_sorted = trial_lengths.groupby("target_model")["actual_turns"].mean().sort_values().index.tolist()
-    trajectories = sorted(length_stats["trajectory"].unique())
-    n_models = len(models_sorted)
-    n_traj = len(trajectories)
-    bar_width = 0.8 / n_traj
-    x_pos = np.arange(n_models)
+        n_models = len(models_sorted)
+        n_traj = len(trajectories)
+        bar_width = 0.8 / n_traj
+        x_pos = np.arange(n_models)
 
-    fig, ax = plt.subplots(figsize=(max(8, n_models * 1.2), 5))
-    for i, traj in enumerate(trajectories):
-        traj_data = length_stats[length_stats["trajectory"] == traj]
-        means = []
-        stds = []
-        for m in models_sorted:
-            cell = traj_data[traj_data["target_model"] == m]
-            means.append(cell["mean"].values[0] if len(cell) > 0 else 0)
-            stds.append(cell["std"].values[0] if len(cell) > 0 else 0)
-        offset = (i - (n_traj - 1) / 2) * bar_width
-        ax.bar(
-            x_pos + offset, means, bar_width * 0.9,
-            yerr=stds, capsize=3,
-            color=traj_colors.get(traj, "#378ADD"), alpha=0.85,
-            edgecolor="white", label=traj,
+        counts = (
+            trial_cat.groupby(["target_model", "trajectory", "termination_category"])
+            .size().unstack(fill_value=0)
         )
 
-    ax.set_xticks(x_pos)
-    ax.set_xticklabels(models_sorted, rotation=30, ha="right", fontsize=9)
-    ax.set_ylabel("Mean conversation length (turns)")
-    ax.set_title("Conversation length by model and trajectory condition")
-    ax.set_ylim(0, 13)
-    ax.axhline(y=12, color="#cccccc", linestyle="--", linewidth=0.8, label="max (12)")
-    ax.legend(fontsize=7, frameon=False, loc="lower left")
-    ax.spines[["top", "right"]].set_visible(False)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "fig5_conversation_length.png"), dpi=200)
-    plt.savefig(os.path.join(output_dir, "fig5_conversation_length.pdf"))
-    plt.close()
-    logger.info("Saved fig5_conversation_length")
+        fig, ax = plt.subplots(figsize=(max(10, n_models * 1.45), 5.5))
+        xtick_pos, xtick_lab = [], []
+        for i, traj in enumerate(trajectories):
+            offset = (i - (n_traj - 1) / 2) * bar_width
+            bottoms = np.zeros(n_models)
+            for cat in TERMINATION_CATEGORIES:  # refusal, full_12, complete
+                vals = np.array([
+                    counts.loc[(m, traj), cat] if (m, traj) in counts.index
+                    and cat in counts.columns else 0
+                    for m in models_sorted
+                ], dtype=float)
+                ax.bar(x_pos + offset, vals, bar_width * 0.9, bottom=bottoms,
+                       color=cat_colors[cat], edgecolor="white", linewidth=0.4,
+                       label=cat_labels[cat] if i == 0 else None)
+                bottoms += vals
+            for xp in x_pos:
+                xtick_pos.append(xp + offset)
+                xtick_lab.append(traj_code[traj])
+
+        # Lower row: trajectory codes at each sub-bar.
+        ax.set_xticks(xtick_pos)
+        ax.set_xticklabels(xtick_lab, fontsize=6, rotation=90)
+        ax.tick_params(axis="x", length=0)
+        # Upper row: model names centred under each group.
+        trans = ax.get_xaxis_transform()
+        for xp, m in zip(x_pos, models_sorted):
+            ax.text(xp, -0.16, m, ha="center", va="top", fontsize=9,
+                    transform=trans)
+
+        ax.set_ylabel("Trials (of 20 per cell)")
+        ax.set_title("Conversation outcome by model and trajectory condition")
+        ax.set_ylim(0, 21)
+        ax.legend(fontsize=8, frameon=False, loc="upper center", ncol=3,
+                  bbox_to_anchor=(0.5, 1.13))
+        ax.spines[["top", "right"]].set_visible(False)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "fig5_conversation_length.png"),
+                    dpi=200, bbox_inches="tight")
+        plt.savefig(os.path.join(output_dir, "fig5_conversation_length.pdf"),
+                    bbox_inches="tight")
+        plt.close()
+        logger.info("Saved fig5_conversation_length (stacked outcomes)")
+    else:
+        # Fallback: mean conversation length (no transcript outcomes available).
+        trial_lengths = df.groupby(
+            ["target_model", "trajectory", "run_id"]
+        )["actual_turns"].first().reset_index()
+        length_stats = trial_lengths.groupby(
+            ["target_model", "trajectory"]
+        )["actual_turns"].agg(["mean", "std"]).reset_index()
+        models_sorted = trial_lengths.groupby("target_model")["actual_turns"].mean().sort_values().index.tolist()
+        trajectories = sorted(length_stats["trajectory"].unique())
+        n_models = len(models_sorted)
+        n_traj = len(trajectories)
+        bar_width = 0.8 / n_traj
+        x_pos = np.arange(n_models)
+        fig, ax = plt.subplots(figsize=(max(8, n_models * 1.2), 5))
+        for i, traj in enumerate(trajectories):
+            traj_data = length_stats[length_stats["trajectory"] == traj]
+            means, stds = [], []
+            for m in models_sorted:
+                cell = traj_data[traj_data["target_model"] == m]
+                means.append(cell["mean"].values[0] if len(cell) > 0 else 0)
+                stds.append(cell["std"].values[0] if len(cell) > 0 else 0)
+            offset = (i - (n_traj - 1) / 2) * bar_width
+            ax.bar(x_pos + offset, means, bar_width * 0.9, yerr=stds, capsize=3,
+                   color=traj_colors.get(traj, "#378ADD"), alpha=0.85,
+                   edgecolor="white", label=traj)
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(models_sorted, rotation=30, ha="right", fontsize=9)
+        ax.set_ylabel("Mean conversation length (turns)")
+        ax.set_title("Conversation length by model and trajectory condition")
+        ax.set_ylim(0, 13)
+        ax.axhline(y=12, color="#cccccc", linestyle="--", linewidth=0.8, label="max (12)")
+        ax.legend(fontsize=7, frameon=False, loc="lower left")
+        ax.spines[["top", "right"]].set_visible(False)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "fig5_conversation_length.png"), dpi=200)
+        plt.savefig(os.path.join(output_dir, "fig5_conversation_length.pdf"))
+        plt.close()
+        logger.info("Saved fig5_conversation_length (length fallback)")
+
+    # ===== Figure 2c: H1b matched effect sizes (+ overall) by target =====
+    # Graphical replacement for the dense H1b effect-size table: each target's
+    # matched-trajectory effect (treatment - control) on its own composite, plus
+    # the overall composite under combined pressure (the H1a contrast). Hatched
+    # bars are not FDR-significant at alpha=0.05 (teammate review).
+    if traj_effects is not None and not traj_effects.empty:
+        matched = {
+            "anthro": ("anthropomorphism_only", "anthro_composite"),
+            "attach": ("attachment_only", "attach_composite"),
+            "depend": ("dependency_only", "depend_composite"),
+            "overall": ("combined", "overall"),
+        }
+        eff_colors = {"anthro": "#534AB7", "attach": "#D4537E",
+                      "depend": "#1D9E75", "overall": "#555555"}
+
+        def _eff(model, traj, metric, col):
+            row = traj_effects[(traj_effects["target_model"] == model)
+                               & (traj_effects["trajectory"] == traj)
+                               & (traj_effects["metric"] == metric)]
+            return row[col].values[0] if len(row) else np.nan
+
+        models_sorted = sorted(
+            traj_effects["target_model"].unique(),
+            key=lambda m: _eff(m, "combined", "overall", "effect_size"),
+        )
+        keys = list(matched.keys())
+        n_models = len(models_sorted)
+        n_keys = len(keys)
+        bar_width = 0.8 / n_keys
+        x_pos = np.arange(n_models)
+
+        from matplotlib.patches import Patch
+
+        fig, ax = plt.subplots(figsize=(max(9, n_models * 1.3), 5))
+        for i, k in enumerate(keys):
+            traj, metric = matched[k]
+            offset = (i - (n_keys - 1) / 2) * bar_width
+            vals = [_eff(m, traj, metric, "effect_size") for m in models_sorted]
+            bars = ax.bar(x_pos + offset, vals, bar_width * 0.9,
+                          color=eff_colors[k], edgecolor="white", alpha=0.9)
+            for b, m in zip(bars, models_sorted):
+                s = _eff(m, traj, metric, "significant_fdr_05")
+                if not (bool(s) if s == s else False):  # NaN-safe falsey
+                    b.set_hatch("////")
+                    b.set_alpha(0.4)
+        ax.axhline(0, color="#888", linewidth=0.8)
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(models_sorted, rotation=30, ha="right", fontsize=9)
+        ax.set_ylabel("Effect size (treatment $-$ control)")
+        ax.set_title("Matched-trajectory effect sizes by target "
+                     "(hatched = not FDR-significant)")
+        comp_handles = [Patch(facecolor=eff_colors[k], edgecolor="white",
+                              label={"overall": "overall (combined)"}.get(k, k))
+                        for k in keys]
+        sig_handle = Patch(facecolor="#cccccc", edgecolor="white", hatch="////",
+                           label="not FDR-significant")
+        ax.legend(handles=comp_handles + [sig_handle], fontsize=8, frameon=False,
+                  ncol=5, loc="upper left")
+        ax.spines[["top", "right"]].set_visible(False)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "fig2c_h1b_effects.png"),
+                    dpi=200, bbox_inches="tight")
+        plt.savefig(os.path.join(output_dir, "fig2c_h1b_effects.pdf"),
+                    bbox_inches="tight")
+        plt.close()
+        logger.info("Saved fig2c_h1b_effects")
 
 
 def main():
@@ -974,6 +1225,9 @@ def main():
                         help="Directory containing judge result JSONs")
     parser.add_argument("--output-dir", default="analysis/",
                         help="Directory for output CSVs and figures")
+    parser.add_argument("--transcripts-dir", default="full_matrix_v6/transcripts",
+                        help="Directory of red-team transcripts; used to label each "
+                        "trial's [END_*] outcome for the conversation-outcome figure.")
     parser.add_argument("--check-reliability", action="store_true",
                         help="Check inter-judge reliability across duplicate scorings")
     parser.add_argument("--no-pca", action="store_true",
@@ -987,6 +1241,7 @@ def main():
 
     # Load data
     df = load_all_results(args.results_dir)
+    df = attach_termination_info(df, args.transcripts_dir)
 
     # Cell-level aggregates — split into primary (headline) and appendix (exploratory) CSVs.
     logger.info("Computing cell-level aggregates...")
@@ -1138,7 +1393,8 @@ def main():
 
     # Figures
     logger.info("Generating figures...")
-    generate_figures(df, args.output_dir, include_exploratory=args.include_exploratory_figures)
+    generate_figures(df, args.output_dir, traj_effects=traj_effects,
+                     include_exploratory=args.include_exploratory_figures)
 
     print(f"\nAll outputs saved to {args.output_dir}/")
 
