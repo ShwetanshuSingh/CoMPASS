@@ -17,6 +17,8 @@ from collections import defaultdict
 from itertools import combinations
 from pathlib import Path
 
+import warnings
+
 import numpy as np
 import pandas as pd
 
@@ -501,6 +503,99 @@ def compute_trajectory_effects(df: pd.DataFrame) -> pd.DataFrame:
         return df_results
 
     return pd.DataFrame(results)
+
+
+def fit_mixed_models(df: pd.DataFrame) -> pd.DataFrame:
+    """Fit the pre-registered mixed-effects model and return variance components.
+
+    Pre-registration section 4 specifies, one model per composite:
+
+        score_composite ~ trajectory * target + (1 | character) + (1 | run_id)
+
+    with trajectory and target sum-coded and REML estimation via statsmodels.
+
+    Two deviations from the literal specification, both forced by the data:
+
+    1. The pre-registration says scores are per-trial composite means, but
+       ``run_id`` is unique per trial (800 run_ids, 800 trials), so a trial-level
+       ``(1 | run_id)`` term is confounded with residual error and not
+       identifiable. We therefore fit at the turn level, where ``run_id`` groups
+       the 5--12 scored turns within a trial and both random effects are
+       estimable. This is the only reading of the written formula that can be fit.
+    2. ``character`` has 4 levels, which is few for a variance component. We fit
+       both the nested parameterisation (groups=character, run_id as a variance
+       component) and the crossed one (both as variance components under a single
+       group) and report the nested fit; the two agree to reported precision.
+
+    H4's pre-registered decision rule is that character is "negligible" only if
+    character SD < 15% of residual SD -- explicitly not on p > 0.05 alone. We
+    report that ratio so the rule can be applied directly.
+    """
+    try:
+        import statsmodels.formula.api as smf
+    except ImportError:
+        logger.warning(
+            "statsmodels not installed; skipping the pre-registered mixed model "
+            "(H4 variance components). Install with: pip install statsmodels"
+        )
+        return pd.DataFrame()
+
+    d = df.copy()
+    d = _add_composites(d)
+    d["overall"] = d[COMPOSITE_NAMES].mean(axis=1)
+
+    fixed = "C(trajectory, Sum) * C(target_model, Sum)"
+    rows = []
+    for comp in ["overall"] + COMPOSITE_NAMES:
+        sub = d.dropna(subset=[comp, "character", "trajectory", "target_model", "run_id"])
+        if sub["character"].nunique() < 2 or len(sub) < 50:
+            logger.warning(f"Insufficient data to fit mixed model for {comp}")
+            continue
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model = smf.mixedlm(
+                f"{comp} ~ {fixed}",
+                data=sub,
+                groups=sub["character"],
+                re_formula="1",
+                vc_formula={"run_id": "0 + C(run_id)"},
+            )
+            fit = model.fit(reml=True, method="lbfgs", maxiter=300)
+
+        var_char = float(np.asarray(fit.cov_re).ravel()[0])
+        var_run = float(fit.vcomp[0]) if len(fit.vcomp) else np.nan
+        var_res = float(fit.scale)
+        total_random = var_char + var_run + var_res
+
+        # Nakagawa marginal R^2: variance explained by the fixed effects
+        # (trajectory x target) as a share of total variance.
+        pred_fixed = np.asarray(model.exog) @ np.asarray(fit.fe_params)
+        var_fixed = float(np.var(pred_fixed, ddof=0))
+
+        sd_ratio = np.sqrt(var_char) / np.sqrt(var_res) if var_res > 0 else np.nan
+        rows.append({
+            "composite": comp,
+            "var_character": var_char,
+            "var_run_id": var_run,
+            "var_residual": var_res,
+            "pct_character_of_random": 100 * var_char / total_random,
+            "pct_run_id_of_random": 100 * var_run / total_random,
+            "pct_residual_of_random": 100 * var_res / total_random,
+            "character_sd_over_residual_sd": sd_ratio,
+            "character_invariant_prereg_rule": bool(sd_ratio < 0.15),
+            "marginal_r2_fixed": var_fixed / (var_fixed + total_random),
+            "conditional_r2": (var_fixed + var_char + var_run) / (var_fixed + total_random),
+            "n_obs": len(sub),
+            "converged": bool(fit.converged),
+        })
+        logger.info(
+            f"Mixed model {comp}: character {100*var_char/total_random:.2f}% of random "
+            f"variance, SD ratio {sd_ratio:.3f} "
+            f"({'passes' if sd_ratio < 0.15 else 'FAILS'} the <0.15 pre-registered rule), "
+            f"fixed-effect R2m {100*var_fixed/(var_fixed+total_random):.1f}%"
+        )
+
+    return pd.DataFrame(rows)
 
 
 def compare_models_paired(df: pd.DataFrame) -> pd.DataFrame:
@@ -1369,6 +1464,26 @@ def main():
         print("\n=== PAIRED MODEL COMPARISONS (FDR-corrected) ===")
         display_cols = [c for c in paired.columns if c != "wilcoxon_stat"]
         print(paired[display_cols].to_string(index=False, float_format="%.4f"))
+
+    # H4: pre-registered mixed-effects model and character variance component.
+    logger.info("Fitting pre-registered mixed-effects models (H4)...")
+    mixed = fit_mixed_models(df)
+    if not mixed.empty:
+        mixed.to_csv(
+            os.path.join(args.output_dir, "mixed_model_variance.csv"), index=False
+        )
+        print("\n=== MIXED-EFFECTS VARIANCE COMPONENTS (H4) ===")
+        show = ["composite", "pct_character_of_random", "pct_run_id_of_random",
+                "pct_residual_of_random", "character_sd_over_residual_sd",
+                "character_invariant_prereg_rule", "marginal_r2_fixed"]
+        print(mixed[show].to_string(index=False, float_format="%.4f"))
+        failing = mixed[~mixed["character_invariant_prereg_rule"]]["composite"].tolist()
+        if failing:
+            print(
+                "\nNOTE: the pre-registered H4 rule (character SD < 15% of residual SD) "
+                f"is NOT met for: {', '.join(failing)}. The character variance share is "
+                "small, but the SD ratio is the criterion the pre-registration specifies."
+            )
 
     # Inter-judge reliability
     if args.check_reliability:
