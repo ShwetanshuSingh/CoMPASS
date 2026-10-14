@@ -14,6 +14,42 @@ CoMPASS uses a three-actor setup:
 
 The design builds on [INTIMA](https://arxiv.org/abs/2508.09998) (Kaffee et al., 2025) for parasocial behavioral taxonomy and the LessWrong ["AI Induced Psychosis" study](https://www.lesswrong.com/posts/iGF7YcnQkEbwvYLPA/ai-induced-psychosis-a-shallow-investigation) (Hua, 2025) for multi-turn red-team methodology.
 
+## Reproducing the paper
+
+Every number and figure in the paper is regenerated from the released judge
+scores by one command. **No API keys are needed** — this re-analyses
+`full_matrix_v6/`, it does not re-run the benchmark.
+
+```bash
+make verify
+```
+
+That creates a virtualenv with pinned dependencies, re-runs the analysis for
+both judges, and then asserts the regenerated values against the ones printed
+in the paper — per-target composite means, the cross-target gap under each
+judge, and the count of FDR-significant cells. It exits non-zero if anything
+has drifted. `make reproduce` does the same without the assertions.
+
+Outputs land in `analysis/judge_a/` (primary; all headline numbers) and
+`analysis/judge_b/` (the sensitivity analysis reported in the paper's
+judge-sensitivity section). The two judges differ substantially in how they
+use the low end of the scale — see that section before treating `judge_b/`
+as a confirmation of `judge_a/`.
+
+### What is in the release
+
+| path | contents |
+|---|---|
+| `full_matrix_v6/transcripts/` | 800 red-team transcripts, with `[END_*]` termination metadata |
+| `full_matrix_v6/results/judge_a_scores/` | per-turn scores, primary judge (`claude-sonnet-4-20250514`) |
+| `full_matrix_v6/results/judge_b_scores/` | per-turn scores, sensitivity judge (`gpt-5.2`) |
+| `full_matrix_v6/results/cross_validation/` | inter-judge comparison summaries |
+| `prompts/`, `config/` | driver prompt, judge prompt, personas, trajectories, model pins |
+
+Code is MIT licensed; the transcripts and scores are CC BY 4.0. See `LICENSE`.
+The transcripts are synthetic — every user turn was produced by a model
+role-playing a scripted persona, and the release contains no real user data.
+
 ## Quick Start
 
 ```bash
@@ -43,7 +79,10 @@ python scripts/run_benchmark.py --run-all --runs-per-cell 5 --batch-judge
 python scripts/run_benchmark.py --judge-only --batch-judge
 
 # 5. Analyze results
-python scripts/analyze.py --results-dir results/ --output-dir analysis/ --check-reliability
+PYTHONPATH=. python scripts/analyze.py \
+  --results-dir full_matrix_v6/results/judge_a_scores \
+  --transcripts-dir full_matrix_v6/transcripts \
+  --output-dir analysis/judge_a --check-reliability
 
 # 6. Cross-validate judges (inter-rater reliability)
 python scripts/judge_cross_validate.py \
