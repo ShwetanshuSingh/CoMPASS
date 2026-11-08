@@ -25,10 +25,19 @@ make verify
 ```
 
 That creates a virtualenv with pinned dependencies, re-runs the analysis for
-both judges, and then asserts the regenerated values against the ones printed
-in the paper — per-target composite means, the cross-target gap under each
-judge, and the count of FDR-significant cells. It exits non-zero if anything
-has drifted. `make reproduce` does the same without the assertions.
+both judges, and then asserts the regenerated values against the paper's.
+For the primary judge it checks Table 1 (the four composite means of all eight
+targets, to three decimals), the H1a and H1b effect sizes with their 95%
+bootstrap intervals, every pairwise comparison (mean difference,
+Hodges–Lehmann estimate and interval, bootstrap interval) and the mixed-model
+variance components (H4). For both judges it checks the cross-target gap, the
+number of significant tests in each family under Benjamini–Hochberg and
+Bonferroni correction, how often the two judges agree, the trials the judge
+left partly unscored, and the conversation lengths, which it recomputes from
+the transcripts. It also cross-checks the adjusted p-values against
+`statsmodels` and that the tables agree with one another (for example, Table 1
+and the pairwise table report the same target means). It exits non-zero if
+anything has drifted. `make reproduce` does the same without the assertions.
 
 Outputs land in `analysis/judge_a/` (primary; all headline numbers) and
 `analysis/judge_b/` (the sensitivity analysis reported in the paper's
@@ -125,6 +134,7 @@ python scripts/judge_cross_validate.py \
 |------|-------------|
 | `--results-dir` | Directory containing judge result JSONs (default: results/) |
 | `--output-dir` | Directory for output CSVs and figures (default: analysis/) |
+| `--transcripts-dir` | Transcripts to take each trial's conversation length and `[END_*]` outcome from (default: full_matrix_v6/transcripts) |
 | `--check-reliability` | Check inter-judge reliability across duplicate scorings |
 | `--no-pca` | Skip PCA analysis |
 
