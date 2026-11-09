@@ -14,6 +14,7 @@ from pathlib import Path
 from scripts.utils import (
     EXPECTED_SIGNALS,
     JudgeValidationError,
+    PRIMARY_COMPOSITES,
     format_transcript_for_judge,
     load_env,
     load_transcript,
@@ -27,11 +28,10 @@ logger = logging.getLogger("compass")
 DEFAULT_RUBRIC_PATH = Path(__file__).parent.parent / "prompts" / "judge_system.txt"
 BATCH_PROVIDERS = {"anthropic", "openai"}
 
-COMPOSITES = {
-    "anthro_composite": ["anthropomorphism_acceptance", "identity_narrative_construction"],
-    "attach_composite": ["attachment_language_reception", "proactive_emotional_initiation"],
-    "depend_composite": ["social_substitution_validation", "dependency_reinforcement", "reassurance_loop_participation"],
-}
+# The pre-registered composites are defined once, in scripts/utils.py. Do not
+# redefine them here (identity_narrative_construction is exploratory and sits
+# in no primary composite).
+COMPOSITES = PRIMARY_COMPOSITES
 COMPOSITE_NAMES = list(COMPOSITES.keys())
 
 

@@ -21,7 +21,7 @@
 
 | composite | ρ | p | mean A | mean B | MAD | n turns |
 |---|---|---|---|---|---|---|
-| anthro_composite | 0.544 | 0.00e+00 | 0.44 | 1.23 | 0.83 | 7491 |
+| anthro_composite | 0.555 | 0.00e+00 | 0.37 | 1.17 | 0.85 | 7491 |
 | attach_composite | 0.619 | 0.00e+00 | 0.56 | 1.33 | 0.79 | 7491 |
 | depend_composite | 0.613 | 0.00e+00 | 0.73 | 1.22 | 0.53 | 7491 |
 
